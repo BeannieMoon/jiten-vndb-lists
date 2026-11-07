@@ -7,7 +7,7 @@
 // @supportURL   https://github.com/BeannieMoon/jiten-vndb-lists/issues
 // @downloadURL  https://raw.githubusercontent.com/BeannieMoon/jiten-vndb-lists/main/jiten-vndb-list-difficulty.user.js
 // @updateURL    https://raw.githubusercontent.com/BeannieMoon/jiten-vndb-lists/main/jiten-vndb-list-difficulty.user.js
-// @version      3.4.2
+// @version      3.5.0
 // @description  Adds a Jiten difficulty column to VNDB lists (your ulist/wishlist/votes, the /v browse list, tag pages, staff/VA pages) and shows it on producer pages, marks what isn't on Jiten (NA), and sorts by difficulty.
 // @match        https://vndb.org/v
 // @match        https://vndb.org/v?*
@@ -32,7 +32,7 @@
 
   const JITEN = 'https://jiten.moe';
   const JITEN_API = 'https://api.jiten.moe/api';
-  const CLIENT_NAME = 'Jiten VNDB List Difficulty/3.4.2';
+  const CLIENT_NAME = 'Jiten VNDB List Difficulty/3.5.0';
   // Measured: 4-5 parallel requests is the fastest; more makes Jiten slower, and bursts get 429s.
   const CONCURRENCY = 4;
   const CATALOGUE_TTL = 24 * 60 * 60 * 1000;
@@ -139,23 +139,36 @@
     const secs = Number(value);
     if (value && !Number.isNaN(secs)) return secs * 1000;
     const date = Date.parse(value || '');
-    return Number.isNaN(date) ? 3000 : Math.max(0, date - Date.now());
+    return Number.isNaN(date) ? 5000 : Math.max(0, date - Date.now());
   }
 
+  // Same pace as Jiten Everywhere: requests start at least 120 ms apart, and a 429 is retried
+  // once, after Retry-After if that's 10 s or less. A second 429 stops Jiten requests in this tab
+  // for a minute (or as long as Jiten asks).
+  const JITEN_GAP = 120;
+  let nextJiten = 0;
+  let jitenStoppedUntil = 0;
   async function jitenGet(path, extraHeaders = {}) {
     const headers = { Accept: 'application/json', 'X-Client-Name': CLIENT_NAME, ...extraHeaders };
     for (let attempt = 0; ; attempt++) {
       await acquire();
       let r;
       try {
-        const wait = pausedUntil - Date.now();
-        if (wait > 0) await sleep(wait);
+        if (jitenStoppedUntil > Date.now()) return { status: 429, text: '' };
+        const start = Math.max(Date.now(), pausedUntil, nextJiten);
+        nextJiten = start + JITEN_GAP;
+        if (start > Date.now()) await sleep(start - Date.now());
         r = await gmGet(JITEN_API + path, headers);
       } finally {
         release();
       }
-      if (r.status !== 429 || attempt >= 5) return r;
-      pausedUntil = Math.max(pausedUntil, Date.now() + Math.min(retryAfterMs(r.retryAfter), 15000));
+      if (r.status !== 429) return r;
+      const wait = retryAfterMs(r.retryAfter);
+      if (attempt >= 1 || wait > 10000) {
+        jitenStoppedUntil = Date.now() + Math.max(wait, 60000);
+        return r;
+      }
+      pausedUntil = Math.max(pausedUntil, Date.now() + wait);
     }
   }
 
@@ -465,8 +478,10 @@
   // VNDB rate-limits by IP, together with your own browsing, and doesn't publish the limit. So:
   // at most one VNDB page every 3 seconds, shared by all VNDB tabs; nothing is retried; and after
   // a 429 nothing more is loaded from VNDB (pages or API) for 10 minutes, in any tab.
+  // The API's published limit is 200 requests per 5 minutes, one every 1.5 seconds, which is
+  // also Jiten Everywhere's pace for it.
   const VNDB_GAP = 3000;
-  const API_GAP = 1000;
+  const API_GAP = 1500;
   const VNDB_COOLDOWN = 10 * 60 * 1000;
   class SlowDown extends Error {}
   const clock = (t) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -795,32 +810,30 @@
     adoptRows(table, res.rows, res.widgets);
   }
 
-  // Loading other pages is always the user's call: a pop-up says how many requests it takes,
-  // and Cancel sorts just this page. The Tampermonkey menu can turn loading off for good.
+  // Loading other pages is the user's call (Settings → "Sorting lists with several pages"):
+  // ask first (the default), always, or never. The question says how many requests it takes.
   async function okToLoad(whole) {
-    if (await getVal('pageOnly')) return false;
+    const mode = (await getVal('loadMode')) || 'ask';
+    if (mode === 'never') return false;
     const until = (await getVal('vndbCooldownUntil')) || 0;
     if (until > Date.now()) {
       pages.note = `${slowDownError(until).message}. Sorted this page only.`;
       return false;
     }
-    let text;
+    if (mode === 'always') return true;
     if (whole) {
       const requests = Math.ceil((pages.total * readPerPage()) / (tableOpts() != null ? 200 : readPerPage()));
-      text = `Sort the whole list (${pages.total} pages) by Jiten difficulty?\n\n`
-        + `This loads the list from VNDB in ${requests} request${requests === 1 ? '.' : 's'}`
-        + (requests > 1 ? `, one every 3 seconds (about ${(requests - 1) * 3 + 1} seconds).` : '');
-    } else {
-      const here = new URL(location.href);
-      const calls = unfilteredBrowse(here) ? 0
-        : Math.ceil(Object.values(state.catalogue).filter((c) => c[1] != null && c[1] >= 0).length / 100);
-      text = 'Sort this long list by its titles that are on Jiten?\n\n'
-        + (calls ? `First, VNDB's API is asked which titles here are on Jiten (${calls} small requests, about ${calls} seconds). Then each`
-          : 'Each')
-        + ' page is loaded from VNDB only when you open it (one request covers four pages).';
+      return askToLoad(`Sort the whole list (${pages.total} pages)?`,
+        `This loads the list from VNDB in ${requests} request${requests === 1 ? '.' : 's'}`
+        + (requests > 1 ? `, one every 3 seconds (about ${(requests - 1) * 3 + 1} seconds).` : ''),
+        'Sort the whole list');
     }
-    return confirm(`${text}\n\nThe script stops at once if VNDB asks it to slow down.\n\n`
-      + 'OK: go ahead\nCancel: sort just this page');
+    const calls = unfilteredBrowse(new URL(location.href)) ? 0
+      : Math.ceil(Object.values(state.catalogue).filter((c) => c[1] != null && c[1] >= 0).length / 100);
+    return askToLoad('Sort this long list by its titles on Jiten?',
+      (calls ? `First, VNDB's API is asked which titles here are on Jiten (${calls} small request${calls === 1 ? '' : 's'}, about ${Math.ceil((calls - 1) * 1.5) + 1} seconds). Then each`
+        : 'Each') + ' page is loaded from VNDB only when you open it (one request covers four pages).',
+      'Sort by Jiten titles');
   }
 
   async function applySort(dir) {
@@ -911,8 +924,8 @@
       h.append(link('⚠', `Jiten: ${state.error.message} — click to retry`, start));
       return;
     }
-    const note = canLoadAll() ? ` (asks first, then loads all ${pages.total} pages of this list)`
-      : canLoadJitenOnly() ? ' (asks first, then sorts the titles in this list that are on Jiten)'
+    const note = canLoadAll() ? ` (the whole list: ${pages.total} pages)`
+      : canLoadJitenOnly() ? ' (the titles in this list that are on Jiten)'
         : pages.total > 1 && !pages.loaded ? ' (this page only)' : '';
     for (const [dir, arrow, label] of [['asc', '▴', 'Easiest first'], ['desc', '▾', 'Hardest first']]) {
       h.append(sortDir === dir ? arrow : link(arrow, label + note, () => applySort(dir)));
@@ -974,7 +987,7 @@
     const close = document.createElement('button');
     close.type = 'button';
     close.textContent = '×';
-    close.title = 'Hide this button (the Jiten column header sorts too). Bring it back from the Tampermonkey menu.';
+    close.title = 'Hide this button (the Jiten column header sorts too). Bring it back in Settings (Tampermonkey menu).';
     close.style.cssText = base + 'padding:7px 10px 7px 6px;opacity:.6;font-size:14px;line-height:1';
     close.addEventListener('click', () => { setVal('showButton', false); removeButton(); });
     buttonBox.append(button, close);
@@ -1013,6 +1026,7 @@
     item.holder.replaceWith(node);
     item.holder = node;
     item.done = result.state !== 'error';
+    item.state = result.state;
     item.foundKey = result.state === 'found' && !result.unlinked ? `${result.deckId}:${result.difficultyRaw}` : null;
     if (item.tr) {
       if (diff != null) item.tr.dataset.jvlDiff = diff; else delete item.tr.dataset.jvlDiff;
@@ -1196,42 +1210,223 @@
     }
   }
 
-  menu('Set Jiten API key (shows which ones are already requested)', async () => {
-    const next = prompt('Jiten API key (jiten.moe/settings → Advanced → API Key). Leave empty to remove it:', '');
-    if (next === null) return;
-    await setVal('apiKey', next.trim());
-    alert(next.trim() ? 'Key saved. Reload the page to check requests.' : 'Key removed.');
-  });
-  menu('Show or hide the floating Jiten button', async () => {
-    const hide = !buttonHidden;
-    await setVal('showButton', !hide);
-    if (hide) removeButton();
-    else { buttonHidden = false; if (items.length) ensureButton(); }
-  });
-  menu('Multi-page lists: turn loading other pages on/off', async () => {
-    const pageOnly = !(await getVal('pageOnly'));
-    await setVal('pageOnly', pageOnly);
-    alert(pageOnly
-      ? 'Off: sorting only ever sorts the page you\'re on. Nothing extra is loaded from VNDB.'
-      : 'On: sorting a multi-page list asks first, then loads the other pages.');
-  });
-  menu('Refresh Jiten data now', async () => {
-    for (const k of await listVals()) if (k === 'catalogue' || k.startsWith('req:') || k.startsWith('jvl:')) await delVal(k);
-    location.reload();
-  });
+  // ---------------------------------------------------------------------------
+  // Dialogs: the Settings window and the "load the whole list?" question. They use the same
+  // dark panel as the floating button, so they look the same on every VNDB skin.
+  // ---------------------------------------------------------------------------
+
+  const BTN = 'font:inherit;font-weight:600;border-radius:6px;padding:6px 14px;cursor:pointer;border:1px solid #78909c;';
+  const BTN_MAIN = BTN + 'background:#90caf9;color:#0d1b26;border-color:#90caf9;';
+  const BTN_PLAIN = BTN + 'background:transparent;color:#eceff1;';
+
+  function el(tag, css, ...kids) {
+    const e = document.createElement(tag);
+    if (css) e.style.cssText = css;
+    e.append(...kids);
+    return e;
+  }
+
+  function dialogButton(label, css, onClick) {
+    const b = el('button', css, label);
+    b.type = 'button';
+    b.addEventListener('click', onClick);
+    return b;
+  }
+
+  // A centered panel over a dimmed page. Escape or a click outside closes it like "Cancel".
+  function openDialog(label, onClose) {
+    const overlay = el('div', 'position:fixed;inset:0;z-index:2147483000;background:rgba(0,0,0,.5);'
+      + 'display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box');
+    const box = el('div', 'background:#263238;color:#eceff1;border:1px solid #546e7a;border-radius:10px;'
+      + 'box-shadow:0 8px 30px rgba(0,0,0,.6);font:13px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;'
+      + 'padding:18px 20px;width:460px;max-width:100%;max-height:100%;overflow:auto;box-sizing:border-box;text-align:left');
+    box.setAttribute('role', 'dialog');
+    box.setAttribute('aria-modal', 'true');
+    box.setAttribute('aria-label', label);
+    box.addEventListener('keydown', (e) => e.stopPropagation()); // keep VNDB's own shortcuts out of it
+    overlay.append(box);
+    const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); close(null); } };
+    const close = (value) => {
+      overlay.remove();
+      document.removeEventListener('keydown', onKey, true);
+      onClose?.(value);
+    };
+    document.addEventListener('keydown', onKey, true);
+    overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) close(null); });
+    document.body.append(overlay);
+    return { box, close };
+  }
+
+  const heading = (text) => el('div', 'font-size:15px;font-weight:700;margin:0 0 8px', text);
+  const small = (...kids) => el('div', 'font-size:12px;opacity:.75;margin:4px 0 0', ...kids);
+  const outLink = (href, text) => {
+    const a = el('a', 'color:#90caf9', text);
+    a.href = href;
+    a.target = '_blank';
+    a.rel = 'noopener';
+    return a;
+  };
+
+  function askToLoad(title, text, yesLabel) {
+    return new Promise((resolve) => {
+      const remember = el('input', 'margin:0');
+      remember.type = 'checkbox';
+      const d = openDialog(title, (yes) => resolve(!!yes));
+      const answer = (yes) => {
+        if (remember.checked) setVal('loadMode', yes ? 'always' : 'never');
+        d.close(yes);
+      };
+      const yes = dialogButton(yesLabel, BTN_MAIN, () => answer(true));
+      d.box.append(
+        heading(title),
+        el('div', 'margin:0 0 6px', text),
+        el('div', 'margin:0 0 12px;opacity:.85', 'The script stops at once if VNDB asks it to slow down.'),
+        el('label', 'display:flex;gap:7px;align-items:center;margin:0 0 14px;cursor:pointer',
+          remember, 'Remember my choice (you can change it in Settings)'),
+        el('div', 'display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap',
+          dialogButton('Just this page', BTN_PLAIN, () => answer(false)), yes),
+      );
+      yes.focus();
+    });
+  }
+
+  // Applies a new or removed API key to the titles already on the page.
+  function applyKey(key) {
+    state.key = key;
+    state.keyRejected = false;
+    requestsInFlight.clear();
+    if (!state.complete) return;
+    for (const item of items) {
+      if (['missing-unchecked', 'missing', 'requested', 'error'].includes(item.state)) { item.done = false; settle(item); }
+    }
+  }
+
+  // The kinds of VNDB pages the script works on. Each can be turned off in Settings.
+  const PAGE_TYPES = [
+    ['lists', 'Your lists, wishlist and votes', /^\/u\d+/],
+    ['browse', 'Browse and search (/v)', /^\/v$/],
+    ['tags', 'Tag pages', /^\/g\d+/],
+    ['staff', 'Staff and voice-actor pages', /^\/s\d+/],
+    ['producers', 'Producer pages', /^\/p\d+/],
+  ];
+  const pageType = PAGE_TYPES.find(([, , re]) => re.test(location.pathname))?.[0] || null;
+
+  let settingsOpen = false;
+  async function openSettings() {
+    if (settingsOpen) return;
+    settingsOpen = true;
+    const d = openDialog('Jiten for VNDB settings', () => { settingsOpen = false; });
+    const section = (title, ...kids) => el('div', 'margin:0 0 14px', el('div', 'font-weight:700;margin:0 0 4px', title), ...kids);
+    const check = (value, checked, ...label) => {
+      const c = el('input', 'margin:0');
+      c.type = 'checkbox';
+      c.value = value;
+      c.checked = checked;
+      return el('label', 'display:flex;gap:7px;align-items:center;margin:3px 0;cursor:pointer', c, ...label);
+    };
+
+    const pagesOff = (await getVal('pagesOff')) || [];
+    const types = PAGE_TYPES.map(([value, label]) => check(value, !pagesOff.includes(value), label,
+      ...(value === pageType ? [el('span', 'opacity:.6', '(this page)')] : [])));
+
+    const mode = (await getVal('loadMode')) || 'ask';
+    const modes = [
+      ['ask', 'Ask first, saying how many requests it takes (recommended)'],
+      ['always', 'Load without asking'],
+      ['never', 'Never: only sort the page I\'m on'],
+    ].map(([value, label]) => {
+      const r = el('input', 'margin:0');
+      r.type = 'radio';
+      r.name = 'jvl-load-mode';
+      r.value = value;
+      r.checked = value === mode;
+      return el('label', 'display:flex;gap:7px;align-items:center;margin:3px 0;cursor:pointer', r, label);
+    });
+
+    const buttonRow = check('button', !buttonHidden, 'Show the sort button in the bottom-left corner');
+    const showButton = buttonRow.querySelector('input');
+
+    const oldKey = ((await getVal('apiKey')) || '').trim();
+    const key = el('input', 'width:100%;box-sizing:border-box;padding:5px 8px;border-radius:6px;border:1px solid #78909c;'
+      + 'background:#1c262b;color:#eceff1;font:inherit');
+    key.type = 'password';
+    key.value = oldKey;
+    key.placeholder = 'Paste your key here';
+    key.autocomplete = 'off';
+    key.spellcheck = false;
+
+    const cached = await getVal('catalogue');
+    const age = cached?.ts ? Math.round((Date.now() - cached.ts) / 60000) : null;
+    const ageText = age == null ? 'Not downloaded yet.'
+      : `Downloaded ${age < 1 ? 'just now' : `${age < 60 ? `${age} min` : `${Math.round(age / 60)} h`} ago`}; it refreshes once a day by itself.`;
+
+    const save = async () => {
+      const picked = modes.map((l) => l.querySelector('input')).find((r) => r.checked)?.value || 'ask';
+      await setVal('loadMode', picked);
+      await setVal('showButton', showButton.checked);
+      if (showButton.checked) { buttonHidden = false; if (items.length) ensureButton(); } else removeButton();
+      const newKey = key.value.trim();
+      if (newKey !== oldKey) {
+        await setVal('apiKey', newKey);
+        applyKey(newKey);
+      }
+      const off = types.map((l) => l.querySelector('input')).filter((c) => !c.checked).map((c) => c.value);
+      await setVal('pagesOff', off);
+      d.close();
+      if (pageType && off.includes(pageType) && running) location.reload(); // takes the column away again
+      else if (pageType && !off.includes(pageType)) run();
+    };
+
+    d.box.append(
+      heading('Jiten Difficulty for VNDB Lists'),
+      section('Show the Jiten column on', ...types,
+        small('Turning off the kind of page you\'re on reloads it.')),
+      section('Sorting lists with several pages', ...modes,
+        small('Loading other pages counts toward VNDB\'s rate limit, together with your own browsing. '
+          + 'Sorting up and down again afterwards is free.')),
+      section('Floating button', buttonRow),
+      section('Jiten API key (optional)', key,
+        small('Shows which titles that aren\'t on Jiten are already requested. Find it at ',
+          outLink('https://jiten.moe/settings', 'jiten.moe/settings'), ' → Advanced → API Key.')),
+      section('Jiten data', el('div', '', ageText),
+        el('div', 'margin:6px 0 0', dialogButton('Download again now', BTN_PLAIN, async () => {
+          for (const k of await listVals()) if (k === 'catalogue' || k.startsWith('req:')) await delVal(k);
+          location.reload();
+        })), small('Reloads this page.')),
+      el('div', 'display:flex;gap:8px;justify-content:space-between;align-items:center;flex-wrap:wrap;'
+        + 'border-top:1px solid #455a64;padding-top:12px',
+      small(`Version ${CLIENT_NAME.split('/')[1]} · `, outLink('https://github.com/BeannieMoon/jiten-vndb-lists', 'GitHub')),
+      el('div', 'display:flex;gap:8px', dialogButton('Cancel', BTN_PLAIN, () => d.close()), dialogButton('Save', BTN_MAIN, save))),
+    );
+  }
+
+  menu('Settings', openSettings);
 
   (async () => {
     // Per-VN cache entries from versions 1-2 aren't used any more.
     for (const k of await listVals()) if (k.startsWith('jvl:')) await delVal(k);
+    // 3.4.2 had an on/off switch for loading other pages; 3.5 has three choices.
+    if ((await getVal('pageOnly')) === true && !(await getVal('loadMode'))) await setVal('loadMode', 'never');
+    await delVal('pageOnly');
   })();
 
-  (async () => {
-    buttonHidden = (await getVal('showButton')) !== true;
+  let running = false;
+  function run() {
+    if (running) return;
+    running = true;
     if (scan()) start();
     let debounce = null;
     new MutationObserver(() => {
       clearTimeout(debounce);
       debounce = setTimeout(() => { if (scan() && !started) start(); }, 200);
     }).observe(document.body, { childList: true, subtree: true });
+  }
+
+  (async () => {
+    buttonHidden = (await getVal('showButton')) !== true;
+    // Turned off for this kind of page: do nothing at all (no Jiten or VNDB requests) until
+    // it's turned back on in Settings.
+    if (pageType && ((await getVal('pagesOff')) || []).includes(pageType)) return;
+    run();
   })();
 })();
