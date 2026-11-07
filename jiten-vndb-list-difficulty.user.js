@@ -7,7 +7,7 @@
 // @supportURL   https://github.com/BeannieMoon/jiten-vndb-lists/issues
 // @downloadURL  https://raw.githubusercontent.com/BeannieMoon/jiten-vndb-lists/main/jiten-vndb-list-difficulty.user.js
 // @updateURL    https://raw.githubusercontent.com/BeannieMoon/jiten-vndb-lists/main/jiten-vndb-list-difficulty.user.js
-// @version      3.6.1
+// @version      3.6.2
 // @description  Adds a Jiten difficulty column to VNDB lists (your ulist/wishlist/votes, the /v browse list, tag pages, staff/VA pages) and shows it on producer pages, marks what isn't on Jiten (NA), and sorts by difficulty.
 // @match        https://vndb.org/v
 // @match        https://vndb.org/v?*
@@ -32,7 +32,7 @@
 
   const JITEN = 'https://jiten.moe';
   const JITEN_API = 'https://api.jiten.moe/api';
-  const CLIENT_NAME = 'Jiten VNDB List Difficulty/3.6.1';
+  const CLIENT_NAME = 'Jiten VNDB List Difficulty/3.6.2';
   // Measured: 4-5 parallel requests is the fastest; more makes Jiten slower, and bursts get 429s.
   const CONCURRENCY = 4;
   const CATALOGUE_TTL = 24 * 60 * 60 * 1000;
@@ -276,21 +276,32 @@
 
   const pct = (raw) => Math.round((Math.max(0, Math.min(5, raw)) / 5) * 100);
 
-  function badgeFor(result, inline) {
+  // cover: VNDB's grid view, where the value sits in a corner of the cover image.
+  function badgeFor(result, inline, cover = false) {
     const b = document.createElement('a');
     b.target = '_blank';
     b.rel = 'noopener';
     b.className = 'jvl-badge';
     b.style.cssText = 'text-decoration:none;white-space:nowrap;font-size:0.92em;' + (inline ? 'margin-left:6px;' : '');
+    // On covers, only titles that are on Jiten (or requested) get a chip: 40 "NA" chips would be noise.
+    if (cover && !['found', 'requested'].includes(result.state)) {
+      b.removeAttribute('target');
+      b.style.display = 'none';
+      return { node: b, diff: null };
+    }
+    const pal = cover ? LIGHT_TEXT : colors;
     let diff = null;
     const set = (color, text, title, href, { bold = false, dim = false } = {}) => {
-      if (color && colors.mode === 'chip') {
+      if (cover) { // a dark chip reads on any picture
+        b.style.cssText += 'display:inline-block;position:relative;z-index:1;margin:6px;padding:1px 6px;border-radius:4px;'
+          + `background:rgba(0,0,0,.8);color:${color || '#ccc'};`;
+      } else if (color && colors.mode === 'chip') {
         b.style.cssText += `background:${color};color:#111;padding:0 5px;border-radius:4px;`;
       } else {
         b.style.color = color || 'inherit';
       }
       if (bold) b.style.fontWeight = '700';
-      if (dim) b.style.opacity = '0.45';
+      if (dim && !cover) b.style.opacity = '0.45';
       b.textContent = text;
       if (title) b.title = title;
       if (href) b.href = href; else b.removeAttribute('target');
@@ -304,7 +315,7 @@
         if (raw != null && raw >= 0) {
           const band = Math.min(Math.max(Math.floor(raw), 0), 5);
           diff = raw;
-          set(colors.diff[band], `${pct(raw)}%${mark}`, `Jiten difficulty ${raw.toFixed(1)}/5 · ${DIFF_NAMES[band]}`
+          set(pal.diff[band], `${pct(raw)}%${mark}`, `Jiten difficulty ${raw.toFixed(1)}/5 · ${DIFF_NAMES[band]}`
             + (result.characterCount ? ` · ${fmt(result.characterCount)} characters` : '') + note, href, { bold: true });
         } else {
           set(null, `on Jiten${mark}`, 'On Jiten, no difficulty rating yet' + note, href, { dim: true });
@@ -312,7 +323,7 @@
         break;
       }
       case 'requested':
-        set(colors.req, 'req.', 'Not on Jiten yet, but already requested',
+        set(pal.req, 'req.', 'Not on Jiten yet, but already requested',
           result.requestId ? `${JITEN}/requests/${result.requestId}` : `${JITEN}/requests`);
         break;
       case 'missing':
@@ -1148,7 +1159,7 @@
     ({ state: 'found', deckId: hit[0], difficultyRaw: hit[1], characterCount: hit[2], unlinked });
 
   function show(item, result) {
-    const { node, diff } = badgeFor(result, item.inline);
+    const { node, diff } = badgeFor(result, item.inline, !!item.cover);
     item.holder.replaceWith(node);
     item.holder = node;
     item.done = result.state !== 'error';
@@ -1174,7 +1185,7 @@
   let checkObserver = null;
   const waitingChecks = new Map();
   function checkWhenVisible(item) {
-    const target = item.tr || item.holder;
+    const target = item.tr || item.cover || item.holder;
     if (!checkObserver) {
       checkObserver = new IntersectionObserver((entries) => {
         for (const e of entries) {
@@ -1213,6 +1224,8 @@
       .filter((a) => !a.dataset.jvlDone && /^\/v\d+$/.test(new URL(a.href).pathname));
     for (const a of links) {
       a.dataset.jvlDone = '1';
+      // VNDB's card view links the cover image too; the value goes next to the title link only.
+      if (a.closest('.imghover, .vncards > div > div:first-child')) continue;
       const td = a.closest('td');
       const tr = a.closest('tr');
       const table = a.closest('table');
@@ -1220,12 +1233,24 @@
       holder.textContent = '…';
       holder.title = 'Waiting for the Jiten data';
       holder.style.cssText = 'opacity:0.4';
+      // VNDB's grid view: one link per cover, only shown on hover, inside a fixed-size card.
+      const cover = a.parentElement?.parentElement?.classList.contains('vngrid') ? a.parentElement : null;
       // One-row-per-VN lists (ulist/wishlist/votes, browse, staff pages) get their own Jiten
       // column and can be sorted. Producer pages put the VN as a header row above its release
       // rows in the same table, so there the value goes next to the title instead.
-      const listRow = table && tr && td && !tr.dataset.jvlRow
+      const listRow = !cover && table && tr && td && !tr.dataset.jvlRow
         && (td.classList.contains('tc_title') || td.classList.contains('tc1'));
-      if (listRow) {
+      if (cover) {
+        // A zero-height strip at the top of the card: the chip shows in the top-right corner of
+        // the cover without taking any room, so VNDB's card layout and hover box stay as they are.
+        const strip = document.createElement('div');
+        strip.className = 'jvl-cover';
+        strip.style.cssText = 'height:0;text-align:right;line-height:normal';
+        holder.textContent = '';
+        strip.append(holder);
+        cover.prepend(strip);
+        addCoverStyle();
+      } else if (listRow) {
         sortableTables.add(table);
         tr.dataset.jvlRow = '1';
         addHeader(table, td.cellIndex);
@@ -1241,7 +1266,7 @@
       pickColors(holder.parentElement); // once per page, from where the first value goes
       const item = {
         vid: new URL(a.href).pathname.slice(1).toLowerCase(), title: a.title || a.textContent,
-        holder, tr: listRow ? tr : null, inline: !listRow,
+        holder, tr: listRow ? tr : null, inline: !listRow && !cover, cover,
       };
       items.push(item);
       if (state.complete || state.error) settle(item);
@@ -1249,6 +1274,16 @@
     }
     if (links.length) { ensureButton(); updateButton(); }
     return links.length;
+  }
+
+  // Grid view: when a cover has a chip, keep the title in VNDB's hover box clear of it.
+  let coverStyled = false;
+  function addCoverStyle() {
+    if (coverStyled) return;
+    coverStyled = true;
+    const st = document.createElement('style');
+    st.textContent = '.vngrid > div:has(> .jvl-cover > a[href]) > a > span:first-child { padding-right: 48px }';
+    (document.head || document.documentElement).append(st);
   }
 
   let started = false;
@@ -1335,7 +1370,16 @@
     }
   }
 
+  // The daily refresh downloads Jiten's whole deck list (about 3 MB), so it waits until the page,
+  // cover images included, has finished loading, plus a few seconds: it mustn't slow VNDB down.
+  const pageLoaded = () => new Promise((resolve) => {
+    if (document.readyState === 'complete') resolve();
+    else addEventListener('load', () => resolve(), { once: true });
+  });
+
   async function refreshInBackground() {
+    await pageLoaded();
+    await sleep(5000);
     if (!(await takeCatalogueLock())) return; // another tab is on it
     let map;
     try {

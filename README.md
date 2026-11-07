@@ -65,6 +65,8 @@ so you can see at a glance which visual novels are easy or hard to read in Japan
   **requested** show **req.** instead.
 - On producer pages (`/p…`), VNDB lists each VN with its releases underneath, so the value goes next to the VN title
   and the page isn't reordered.
+- In VNDB's **grid view** (covers only), titles that are on Jiten get a small chip in the top-right corner of the cover.
+  In **card view**, the value goes next to the title. Sorting works in the normal list view.
 
 **Browse list** (`/v`), hardest first:
 
@@ -120,9 +122,11 @@ Everything works without a key. A key only adds the *already requested* check fo
 
 ## How it works
 
-The script downloads Jiten's list of visual-novel and game decks that link to VNDB: 2 requests, about a second.
+The script downloads Jiten's list of visual-novel and game decks that link to VNDB: 2 requests, about 3.5 MB
+(compressed), which takes a few seconds.
 It keeps that list for 24 hours, so later pages show their values instantly.
-After a day it shows the saved list straight away and refreshes it quietly in the background.
+After a day it shows the saved list straight away and refreshes it quietly in the background. That download is
+about 3 MB, so it waits until the page, cover images included, has finished loading.
 To force a refresh, click **Download again now** in Settings.
 
 It only talks to `api.jiten.moe`, and to `vndb.org` / `api.vndb.org` when a sort needs the rest of a list.
