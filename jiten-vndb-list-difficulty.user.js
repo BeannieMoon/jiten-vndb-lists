@@ -7,7 +7,7 @@
 // @supportURL   https://github.com/BeannieMoon/jiten-vndb-lists/issues
 // @downloadURL  https://raw.githubusercontent.com/BeannieMoon/jiten-vndb-lists/main/jiten-vndb-list-difficulty.user.js
 // @updateURL    https://raw.githubusercontent.com/BeannieMoon/jiten-vndb-lists/main/jiten-vndb-list-difficulty.user.js
-// @version      3.5.3
+// @version      3.6.0
 // @description  Adds a Jiten difficulty column to VNDB lists (your ulist/wishlist/votes, the /v browse list, tag pages, staff/VA pages) and shows it on producer pages, marks what isn't on Jiten (NA), and sorts by difficulty.
 // @match        https://vndb.org/v
 // @match        https://vndb.org/v?*
@@ -32,7 +32,7 @@
 
   const JITEN = 'https://jiten.moe';
   const JITEN_API = 'https://api.jiten.moe/api';
-  const CLIENT_NAME = 'Jiten VNDB List Difficulty/3.5.3';
+  const CLIENT_NAME = 'Jiten VNDB List Difficulty/3.6.0';
   // Measured: 4-5 parallel requests is the fastest; more makes Jiten slower, and bursts get 429s.
   const CONCURRENCY = 4;
   const CATALOGUE_TTL = 24 * 60 * 60 * 1000;
@@ -111,7 +111,7 @@
   function gmGet(url, headers) {
     return new Promise((resolve, reject) => {
       gmXhr({
-        method: 'GET', url, headers, timeout: 20000, anonymous: true,
+        method: 'GET', url, headers, timeout: 60000, anonymous: true, // the deck list is about 3 MB
         onload: (r) => resolve({
           status: r.status, text: r.responseText,
           retryAfter: /^retry-after:\s*(.+)$/im.exec(r.responseHeaders || '')?.[1]?.trim(),
@@ -174,13 +174,19 @@
 
   async function getJson(path, extraHeaders) {
     const r = await jitenGet(path, extraHeaders);
-    if (r.status < 200 || r.status >= 300) throw new Error(`Jiten returned an error (${r.status})`);
+    if (r.status < 200 || r.status >= 300) {
+      const e = new Error(`Jiten returned an error (${r.status})`);
+      e.status = r.status;
+      throw e;
+    }
     return JSON.parse(r.text);
   }
 
   // ---------------------------------------------------------------------------
-  // Catalogue: every Jiten VN/game deck with a VNDB link, fetched in pages of 50.
-  // onPage runs after each page, so titles show up while the rest is still loading.
+  // Catalogue: every Jiten VN/game deck with a VNDB link. Jiten sends all decks of one type in
+  // a single answer, so that's 2 requests (visual novels first, then games). If that endpoint
+  // ever stops working, it falls back to paging through the deck list 50 at a time (60+ requests).
+  // onPage runs after each answer, so titles show up while the rest is still loading.
   // ---------------------------------------------------------------------------
 
   async function buildCatalogue(onPage) {
@@ -195,6 +201,20 @@
         }
       }
     };
+    try {
+      onPage(map, 0, CATALOGUE_TYPES.length);
+      for (const [i, t] of CATALOGUE_TYPES.entries()) {
+        const decks = await getJson(`/media-deck/get-media-decks-by-type/${t}`);
+        if (!Array.isArray(decks)) throw Object.assign(new Error('unexpected answer'), { status: 0 });
+        add(decks);
+        onPage(map, i + 1, CATALOGUE_TYPES.length);
+      }
+      return map;
+    } catch (e) {
+      // Only an endpoint that's gone or changed falls back; a busy Jiten (429, 5xx, offline)
+      // shouldn't get 60 more requests.
+      if (!(e.status === 0 || e.status === 400 || e.status === 404 || e.status === 405)) throw e;
+    }
     const page = (type, offset) => getJson(`/media-deck/get-media-decks?mediaType=${type}&offset=${offset}`);
     const firsts = await Promise.all(CATALOGUE_TYPES.map((t) => page(t, 0)));
     const rest = [];
@@ -1023,7 +1043,7 @@
   // data downloads (about 10 seconds, once a day) or fails, a small note in the corner says so.
   let statusBox = null;
   function updateStatus() {
-    const busy = started && !state.complete ? busyText() : null;
+    const busy = started && !state.complete && (state.waiting || Date.now() - state.startedAt > 1000) ? busyText() : null;
     const wanted = (busy || state.error) && !headerCells.size && items.length && !button;
     if (!wanted) {
       statusBox?.remove();
@@ -1209,6 +1229,8 @@
   async function start() {
     started = true;
     state.error = null;
+    state.startedAt = Date.now();
+    setTimeout(updateButton, 1100); // shows the corner note if the download is still going
     updateButton();
     state.key = ((await getVal('apiKey')) || '').trim();
     let cached = await getVal('catalogue');

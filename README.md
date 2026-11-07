@@ -56,7 +56,7 @@ so you can see at a glance which visual novels are easy or hard to read in Japan
   own order with everything.
 - A small spinner and a counter (like `2/6`) next to the *Jiten* header show while anything loads.
   Hover over them for details. On pages without the column (producer pages), a small note in the corner shows the
-  first download of the Jiten data (about 10 seconds, once a day).
+  first download of the Jiten data if it takes more than a second.
 - There's also an optional floating button in the bottom-left corner that sorts and shows progress.
   It's off by default. Turn it on in **Settings**; its **×** turns it off again.
 - **Fits every VNDB skin.** The colors adjust to your skin: light text on dark skins, dark text on light skins,
@@ -119,7 +119,7 @@ Everything works without a key. A key only adds the *already requested* check fo
 
 ## How it works
 
-The script downloads Jiten's list of visual-novel and game decks that link to VNDB (about 60 small requests).
+The script downloads Jiten's list of visual-novel and game decks that link to VNDB: 2 requests, about a second.
 It keeps that list for 24 hours, so later pages show their values instantly.
 After a day it shows the saved list straight away and refreshes it quietly in the background.
 To force a refresh, click **Download again now** in Settings.
@@ -140,7 +140,7 @@ so the script stays well below what a person clicking around does:
 - Nothing is retried. If VNDB ever answers *429 Too Many Requests*, the script stops at once and loads nothing
   from VNDB for 10 minutes, in any tab. The ⚠ next to the *Jiten* header says so, and that page is sorted on its own.
 
-On the Jiten side, the catalogue is about 60 requests once a day, downloaded by one tab even if you open several,
+On the Jiten side, the catalogue is 2 requests once a day, downloaded by one tab even if you open several,
 with at least 120 ms between requests (Jiten Everywhere's pace). A *429* from Jiten is retried once; a second one
 stops Jiten requests for a minute. With an API key, the *already requested* check runs only for titles that come on
 screen, each answer is kept for a week, and a rejected key stops the checks.
