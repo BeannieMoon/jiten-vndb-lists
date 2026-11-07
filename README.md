@@ -24,7 +24,7 @@ so you can see at a glance which visual novels are easy or hard to read in Japan
 - **Sorts** the list by difficulty with the ▴ ▾ arrows in the *Jiten* header, just like VNDB's other columns
   (▴ easiest first, ▾ hardest first). Titles that aren't on Jiten always go last.
 - **Sorts the whole list, not just one page, and keeps the page tabs.** If your list spans several pages,
-  the first sort loads all of them (lists up to 2,000 titles), sorts everything together, and shows the result
+  the first sort asks you first (saying how many requests it takes), then loads all of them (lists up to 2,000 titles), sorts everything together, and shows the result
   in pages again, with tabs that look like VNDB's and switch instantly. Rows from other pages keep working vote,
   label and date editors.
 - **Very long lists** (the `/v` browse list, big tag pages) are sorted by the titles that are on Jiten: VNDB's API
@@ -90,7 +90,10 @@ It only talks to `api.jiten.moe`, and to `vndb.org` / `api.vndb.org` when a sort
 **Gentle on both sites.** VNDB rate-limits by IP, counts your own browsing too, and doesn't publish the limit,
 so the script stays well below what a person clicking around does:
 
-- Nothing extra is loaded until you sort a multi-page list, and then only once per visit.
+- Nothing extra is loaded unless you sort a multi-page list **and say yes** to the pop-up, which tells you how many
+  requests it will make. *Cancel* sorts just the page you're on. To never load other pages at all, use
+  *Multi-page lists: turn loading other pages on/off* in the Tampermonkey menu.
+- Loaded at most once per visit.
 - At most one VNDB page every 3 seconds, shared by all your VNDB tabs, 200 rows per request.
   A 1,000-title list is 5 requests; a long list is one request per four pages you actually open.
 - VNDB's API (meant for scripts, with published limits) is used at most once a second.

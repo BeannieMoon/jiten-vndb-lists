@@ -7,7 +7,7 @@
 // @supportURL   https://github.com/BeannieMoon/jiten-vndb-lists/issues
 // @downloadURL  https://raw.githubusercontent.com/BeannieMoon/jiten-vndb-lists/main/jiten-vndb-list-difficulty.user.js
 // @updateURL    https://raw.githubusercontent.com/BeannieMoon/jiten-vndb-lists/main/jiten-vndb-list-difficulty.user.js
-// @version      3.4.1
+// @version      3.4.2
 // @description  Adds a Jiten difficulty column to VNDB lists (your ulist/wishlist/votes, the /v browse list, tag pages, staff/VA pages) and shows it on producer pages, marks what isn't on Jiten (NA), and sorts by difficulty.
 // @match        https://vndb.org/v
 // @match        https://vndb.org/v?*
@@ -32,7 +32,7 @@
 
   const JITEN = 'https://jiten.moe';
   const JITEN_API = 'https://api.jiten.moe/api';
-  const CLIENT_NAME = 'Jiten VNDB List Difficulty/3.4.1';
+  const CLIENT_NAME = 'Jiten VNDB List Difficulty/3.4.2';
   // Measured: 4-5 parallel requests is the fastest; more makes Jiten slower, and bursts get 429s.
   const CONCURRENCY = 4;
   const CATALOGUE_TTL = 24 * 60 * 60 * 1000;
@@ -673,13 +673,15 @@
     view.rows = rows.filter((r) => r.dataset.jvlRow);
   }
 
+  const unfilteredBrowse = (u) => u.pathname === '/v' && !['f', 'q', 'ch'].some((k) => u.searchParams.get(k));
+
   async function loadJitenTitles(table) {
     const here = new URL(location.href);
     here.searchParams.delete('p');
     // Only titles with a difficulty matter here: everything else sorts last anyway.
     const ids = Object.keys(state.catalogue).filter((v) => state.catalogue[v][1] != null && state.catalogue[v][1] >= 0);
     let members;
-    if (here.pathname === '/v' && !['f', 'q', 'ch'].some((k) => here.searchParams.get(k))) {
+    if (unfilteredBrowse(here)) {
       members = ids; // the browse list without filters is every VN
     } else {
       const parts = [];
@@ -793,6 +795,34 @@
     adoptRows(table, res.rows, res.widgets);
   }
 
+  // Loading other pages is always the user's call: a pop-up says how many requests it takes,
+  // and Cancel sorts just this page. The Tampermonkey menu can turn loading off for good.
+  async function okToLoad(whole) {
+    if (await getVal('pageOnly')) return false;
+    const until = (await getVal('vndbCooldownUntil')) || 0;
+    if (until > Date.now()) {
+      pages.note = `${slowDownError(until).message}. Sorted this page only.`;
+      return false;
+    }
+    let text;
+    if (whole) {
+      const requests = Math.ceil((pages.total * readPerPage()) / (tableOpts() != null ? 200 : readPerPage()));
+      text = `Sort the whole list (${pages.total} pages) by Jiten difficulty?\n\n`
+        + `This loads the list from VNDB in ${requests} request${requests === 1 ? '.' : 's'}`
+        + (requests > 1 ? `, one every 3 seconds (about ${(requests - 1) * 3 + 1} seconds).` : '');
+    } else {
+      const here = new URL(location.href);
+      const calls = unfilteredBrowse(here) ? 0
+        : Math.ceil(Object.values(state.catalogue).filter((c) => c[1] != null && c[1] >= 0).length / 100);
+      text = 'Sort this long list by its titles that are on Jiten?\n\n'
+        + (calls ? `First, VNDB's API is asked which titles here are on Jiten (${calls} small requests, about ${calls} seconds). Then each`
+          : 'Each')
+        + ' page is loaded from VNDB only when you open it (one request covers four pages).';
+    }
+    return confirm(`${text}\n\nThe script stops at once if VNDB asks it to slow down.\n\n`
+      + 'OK: go ahead\nCancel: sort just this page');
+  }
+
   async function applySort(dir) {
     if (!sortableTables.size || pages.loading) return;
     if (!state.complete) { // sort as soon as the Jiten data is in
@@ -801,19 +831,20 @@
       return;
     }
     const table = [...sortableTables][0];
-    if (canLoadAll() || canLoadJitenOnly()) {
+    const whole = canLoadAll();
+    if ((whole || canLoadJitenOnly()) && await okToLoad(whole)) {
       pages.loading = true;
       updateButton();
       try {
-        if (canLoadAll()) await loadAllPages(table); else await loadJitenTitles(table);
+        if (whole) await loadAllPages(table); else await loadJitenTitles(table);
       } catch (e) {
         console.warn('[Jiten VNDB] could not load the whole list:', e);
         pages.note = `${e.message}. Sorted this page only.`;
         pages.failed++;
       }
       pages.loading = false;
-      pages.loaded = true;
     }
+    pages.loaded = true; // asked once per page view: later sorts reuse what's here
     if (!sortDir) for (const t of sortableTables) releaseVndbSort(t);
     sortDir = dir;
     view.page = 1;
@@ -880,8 +911,8 @@
       h.append(link('⚠', `Jiten: ${state.error.message} — click to retry`, start));
       return;
     }
-    const note = canLoadAll() ? ` (loads all ${pages.total} pages of this list)`
-      : canLoadJitenOnly() ? ' (sorts the titles in this list that are on Jiten)'
+    const note = canLoadAll() ? ` (asks first, then loads all ${pages.total} pages of this list)`
+      : canLoadJitenOnly() ? ' (asks first, then sorts the titles in this list that are on Jiten)'
         : pages.total > 1 && !pages.loaded ? ' (this page only)' : '';
     for (const [dir, arrow, label] of [['asc', '▴', 'Easiest first'], ['desc', '▾', 'Hardest first']]) {
       h.append(sortDir === dir ? arrow : link(arrow, label + note, () => applySort(dir)));
@@ -1176,6 +1207,13 @@
     await setVal('showButton', !hide);
     if (hide) removeButton();
     else { buttonHidden = false; if (items.length) ensureButton(); }
+  });
+  menu('Multi-page lists: turn loading other pages on/off', async () => {
+    const pageOnly = !(await getVal('pageOnly'));
+    await setVal('pageOnly', pageOnly);
+    alert(pageOnly
+      ? 'Off: sorting only ever sorts the page you\'re on. Nothing extra is loaded from VNDB.'
+      : 'On: sorting a multi-page list asks first, then loads the other pages.');
   });
   menu('Refresh Jiten data now', async () => {
     for (const k of await listVals()) if (k === 'catalogue' || k.startsWith('req:') || k.startsWith('jvl:')) await delVal(k);
