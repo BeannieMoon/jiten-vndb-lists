@@ -3,6 +3,27 @@
 A small userscript that shows [Jiten](https://jiten.moe) difficulty on [VNDB](https://vndb.org) **list** pages,
 so you can see at a glance which visual novels are easy or hard to read in Japanese, and sort by it.
 
+> [!CAUTION]
+> ### ⚠️ Please be gentle with VNDB
+> VNDB limits how fast one connection can load pages. If you load too much too quickly, VNDB shows
+> **"429 - You've been rate-limited!"** and blocks you for a while. VNDB warns that repeated excessive requests
+> can lead to a **permanent IP ban**.
+>
+> Sorting a list with several pages has to load the other pages from VNDB. The script is built to stay well below
+> the limit: it **asks you first**, says how many requests it will make, waits 3 seconds between requests, and
+> stops at once if VNDB says to slow down. But it shares the limit with everything else you do on VNDB.
+>
+> - **Use version 3.4.1 or newer.** 3.4.0 loaded big lists far too fast. Update in Tampermonkey.
+> - **Don't reload the page and re-sort a big list over and over.** Sorting up and down on the same page is
+>   free, but every reload starts over.
+> - **Don't sort lots of lists in a row**, in one tab or many, especially while you're also browsing VNDB.
+> - **If you see the 429 page, stop.** Don't keep refreshing; wait 10–15 minutes. (When the script itself
+>   gets a 429, it also pauses for 10 minutes on its own.)
+> - **Want zero risk?** In the Tampermonkey menu choose *Multi-page lists: turn loading other pages on/off*.
+>   Sorting then only sorts the page you're on, and the script never loads anything extra from VNDB.
+>
+> This is an unofficial fan script, provided as is (see the [license](LICENSE)). You use it at your own risk.
+
 > ### ⭐ First, install Jiten Everywhere
 > This script is only a companion. The real star is **[Jiten Everywhere](https://greasyfork.org/scripts/600904)**
 > by nerenar ([GitHub](https://github.com/nerenar/jiten-everywhere)). It brings Jiten's difficulty and deck
