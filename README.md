@@ -24,12 +24,13 @@ so you can see at a glance which visual novels are easy or hard to read in Japan
 - **Sorts** the list by difficulty with the ▴ ▾ arrows in the *Jiten* header, just like VNDB's other columns
   (▴ easiest first, ▾ hardest first). Titles that aren't on Jiten always go last.
 - **Sorts the whole list, not just one page, and keeps the page tabs.** If your list spans several pages,
-  the first sort loads all of them (lists up to 4,000 titles), sorts everything together, and shows the result
+  the first sort loads all of them (lists up to 2,000 titles), sorts everything together, and shows the result
   in pages again, with tabs that look like VNDB's and switch instantly. Rows from other pages keep working vote,
   label and date editors.
 - **Very long lists** (the `/v` browse list, big tag pages) are sorted by the titles that are on Jiten: VNDB's API
-  finds which titles in the list (with your filters) are on Jiten, and only those are loaded and sorted.
-  A **+ N not on Jiten ›** tab takes you back to VNDB's own order with everything.
+  finds which titles in the list (with your filters) are on Jiten, and each page's rows are loaded from VNDB only
+  when you open that page (one request covers four pages). A **+ N not on Jiten ›** tab takes you back to VNDB's
+  own order with everything.
 - A small spinner next to the *Jiten* header shows while anything loads. Hover over it for progress.
 - There's also an optional floating button in the bottom-left corner that sorts and shows progress.
   It's off by default. Turn it on from the Tampermonkey menu (*Show or hide the floating Jiten button*); its **×** turns it off again.
@@ -86,15 +87,19 @@ To force a refresh, choose **Refresh Jiten data now** in the Tampermonkey menu.
 
 It only talks to `api.jiten.moe`, and to `vndb.org` / `api.vndb.org` when a sort needs the rest of a list.
 
-**Gentle on both sites.** VNDB rate-limits by IP and counts your own browsing too, so the script:
+**Gentle on both sites.** VNDB rate-limits by IP, counts your own browsing too, and doesn't publish the limit,
+so the script stays well below what a person clicking around does:
 
-- loads list pages one at a time, 200 rows per request, with a 1.5-second pause in between
-  (a 1,000-title list is 5 requests; the whole browse list is about 15 plus a few API calls);
-- loads a list only when you sort it, and only once per visit;
-- backs off for 15 seconds or more if VNDB ever answers *429 Too Many Requests*, and gives up after a few tries.
+- Nothing extra is loaded until you sort a multi-page list, and then only once per visit.
+- At most one VNDB page every 3 seconds, shared by all your VNDB tabs, 200 rows per request.
+  A 1,000-title list is 5 requests; a long list is one request per four pages you actually open.
+- VNDB's API (meant for scripts, with published limits) is used at most once a second.
+- Nothing is retried. If VNDB ever answers *429 Too Many Requests*, the script stops at once and loads nothing
+  from VNDB for 10 minutes, in any tab. The ⚠ next to the *Jiten* header says so, and that page is sorted on its own.
 
-On the Jiten side, the catalogue is about 60 requests once a day. With an API key, the *already requested* check
-runs only for titles that come on screen, and each answer is kept for a week.
+On the Jiten side, the catalogue is about 60 requests once a day, downloaded by one tab even if you open several.
+With an API key, the *already requested* check runs only for titles that come on screen, each answer is kept for a
+week, and a rejected key stops the checks.
 
 ## Credits
 
