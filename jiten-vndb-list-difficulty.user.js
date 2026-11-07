@@ -7,7 +7,7 @@
 // @supportURL   https://github.com/BeannieMoon/jiten-vndb-lists/issues
 // @downloadURL  https://raw.githubusercontent.com/BeannieMoon/jiten-vndb-lists/main/jiten-vndb-list-difficulty.user.js
 // @updateURL    https://raw.githubusercontent.com/BeannieMoon/jiten-vndb-lists/main/jiten-vndb-list-difficulty.user.js
-// @version      3.5.0
+// @version      3.5.1
 // @description  Adds a Jiten difficulty column to VNDB lists (your ulist/wishlist/votes, the /v browse list, tag pages, staff/VA pages) and shows it on producer pages, marks what isn't on Jiten (NA), and sorts by difficulty.
 // @match        https://vndb.org/v
 // @match        https://vndb.org/v?*
@@ -32,7 +32,7 @@
 
   const JITEN = 'https://jiten.moe';
   const JITEN_API = 'https://api.jiten.moe/api';
-  const CLIENT_NAME = 'Jiten VNDB List Difficulty/3.5.0';
+  const CLIENT_NAME = 'Jiten VNDB List Difficulty/3.5.1';
   // Measured: 4-5 parallel requests is the fastest; more makes Jiten slower, and bursts get 429s.
   const CONCURRENCY = 4;
   const CATALOGUE_TTL = 24 * 60 * 60 * 1000;
@@ -1211,80 +1211,118 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Dialogs: the Settings window and the "load the whole list?" question. They use the same
-  // dark panel as the floating button, so they look the same on every VNDB skin.
+  // Dialogs: the Settings window and the "load the whole list?" question. They live in a
+  // shadow root, so VNDB's skins can't restyle their checkboxes and buttons, and they take a
+  // light or dark look from the skin behind them (like Jiten Everywhere's settings).
   // ---------------------------------------------------------------------------
 
-  const BTN = 'font:inherit;font-weight:600;border-radius:6px;padding:6px 14px;cursor:pointer;border:1px solid #78909c;';
-  const BTN_MAIN = BTN + 'background:#90caf9;color:#0d1b26;border-color:#90caf9;';
-  const BTN_PLAIN = BTN + 'background:transparent;color:#eceff1;';
+  const DIALOG_THEMES = {
+    dark: { bg: '#1c1e24', fg: '#e4e6eb', muted: '#a0a6b0', line: '#3a3f4b', field: '#262a33', accent: '#8ab4f8', onAccent: '#10131a' },
+    light: { bg: '#ffffff', fg: '#1f2328', muted: '#5f6670', line: '#d0d5dc', field: '#f3f4f6', accent: '#2557c9', onAccent: '#ffffff' },
+  };
 
-  function el(tag, css, ...kids) {
+  function dialogCss() {
+    // A dark panel where white text reads better than black on the page behind it.
+    const behind = backgroundOf(document.querySelector('article') || document.body);
+    const dark = contrast([255, 255, 255], behind) > contrast([0, 0, 0], behind);
+    const t = DIALOG_THEMES[dark ? 'dark' : 'light'];
+    return `
+    :host{all:initial}
+    .overlay{position:fixed;inset:0;z-index:2147483000;background:rgba(0,0,0,.45);display:flex;align-items:center;
+      justify-content:center;padding:16px;box-sizing:border-box}
+    .box{color-scheme:${dark ? 'dark' : 'light'};background:${t.bg};color:${t.fg};border:1px solid ${t.line};border-radius:10px;
+      box-shadow:0 12px 40px rgba(0,0,0,.45);font:13px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;padding:18px 20px;
+      width:460px;max-width:100%;max-height:100%;overflow:auto;box-sizing:border-box;text-align:left}
+    h2{font-size:15px;font-weight:700;margin:0 0 10px}
+    p{margin:0 0 8px}
+    .section{margin:0 0 14px}
+    .title{font-weight:700;margin:0 0 4px}
+    label{display:flex;gap:8px;align-items:center;margin:4px 0;cursor:pointer}
+    label.remember{margin:10px 0 14px}
+    input[type=checkbox],input[type=radio]{accent-color:${t.accent};width:15px;height:15px;margin:0;flex:none;cursor:pointer}
+    input[type=password]{width:100%;box-sizing:border-box;padding:6px 8px;border-radius:6px;border:1px solid ${t.line};
+      background:${t.field};color:${t.fg};font:inherit}
+    input:focus-visible,button:focus-visible{outline:2px solid ${t.accent};outline-offset:2px}
+    .note{font-size:12px;color:${t.muted};margin:4px 0 0}
+    .dim{color:${t.muted}}
+    .spaced{margin:6px 0 0}
+    a{color:${t.accent}}
+    button{font:inherit;font-weight:600;border-radius:6px;padding:6px 14px;cursor:pointer;border:1px solid ${t.line};
+      background:${t.field};color:${t.fg}}
+    button:hover{border-color:${t.accent}}
+    button.main{background:${t.accent};border-color:${t.accent};color:${t.onAccent}}
+    .buttons{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}
+    .foot{display:flex;gap:8px;justify-content:space-between;align-items:center;flex-wrap:wrap;
+      border-top:1px solid ${t.line};padding-top:12px;margin-top:4px}
+    .foot .note{margin:0}`;
+  }
+
+  function el(tag, cls, ...kids) {
     const e = document.createElement(tag);
-    if (css) e.style.cssText = css;
+    if (cls) e.className = cls;
     e.append(...kids);
     return e;
   }
 
-  function dialogButton(label, css, onClick) {
-    const b = el('button', css, label);
+  function field(type, props = {}) {
+    const i = document.createElement('input');
+    i.type = type;
+    return Object.assign(i, props);
+  }
+
+  function dialogButton(label, cls, onClick) {
+    const b = el('button', cls, label);
     b.type = 'button';
     b.addEventListener('click', onClick);
     return b;
   }
 
+  const note = (...kids) => el('div', 'note', ...kids);
+  const outLink = (href, text) => Object.assign(el('a', '', text), { href, target: '_blank', rel: 'noopener' });
+
   // A centered panel over a dimmed page. Escape or a click outside closes it like "Cancel".
   function openDialog(label, onClose) {
-    const overlay = el('div', 'position:fixed;inset:0;z-index:2147483000;background:rgba(0,0,0,.5);'
-      + 'display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box');
-    const box = el('div', 'background:#263238;color:#eceff1;border:1px solid #546e7a;border-radius:10px;'
-      + 'box-shadow:0 8px 30px rgba(0,0,0,.6);font:13px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;'
-      + 'padding:18px 20px;width:460px;max-width:100%;max-height:100%;overflow:auto;box-sizing:border-box;text-align:left');
+    const host = document.createElement('div');
+    host.className = 'jvl-dialog';
+    host.style.cssText = 'all:initial'; // page CSS on plain divs (transforms, display) can't reach the panel
+    const root = host.attachShadow({ mode: 'open' });
+    const style = document.createElement('style');
+    style.textContent = dialogCss();
+    const overlay = el('div', 'overlay');
+    const box = el('div', 'box');
     box.setAttribute('role', 'dialog');
     box.setAttribute('aria-modal', 'true');
     box.setAttribute('aria-label', label);
     box.addEventListener('keydown', (e) => e.stopPropagation()); // keep VNDB's own shortcuts out of it
     overlay.append(box);
+    root.append(style, overlay);
     const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); close(null); } };
     const close = (value) => {
-      overlay.remove();
+      host.remove();
       document.removeEventListener('keydown', onKey, true);
       onClose?.(value);
     };
     document.addEventListener('keydown', onKey, true);
     overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) close(null); });
-    document.body.append(overlay);
+    document.body.append(host);
     return { box, close };
   }
 
-  const heading = (text) => el('div', 'font-size:15px;font-weight:700;margin:0 0 8px', text);
-  const small = (...kids) => el('div', 'font-size:12px;opacity:.75;margin:4px 0 0', ...kids);
-  const outLink = (href, text) => {
-    const a = el('a', 'color:#90caf9', text);
-    a.href = href;
-    a.target = '_blank';
-    a.rel = 'noopener';
-    return a;
-  };
-
   function askToLoad(title, text, yesLabel) {
     return new Promise((resolve) => {
-      const remember = el('input', 'margin:0');
-      remember.type = 'checkbox';
+      const remember = field('checkbox');
       const d = openDialog(title, (yes) => resolve(!!yes));
       const answer = (yes) => {
         if (remember.checked) setVal('loadMode', yes ? 'always' : 'never');
         d.close(yes);
       };
-      const yes = dialogButton(yesLabel, BTN_MAIN, () => answer(true));
+      const yes = dialogButton(yesLabel, 'main', () => answer(true));
       d.box.append(
-        heading(title),
-        el('div', 'margin:0 0 6px', text),
-        el('div', 'margin:0 0 12px;opacity:.85', 'The script stops at once if VNDB asks it to slow down.'),
-        el('label', 'display:flex;gap:7px;align-items:center;margin:0 0 14px;cursor:pointer',
-          remember, 'Remember my choice (you can change it in Settings)'),
-        el('div', 'display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap',
-          dialogButton('Just this page', BTN_PLAIN, () => answer(false)), yes),
+        el('h2', '', title),
+        el('p', '', text),
+        el('p', 'dim', 'The script stops at once if VNDB asks it to slow down.'),
+        el('label', 'remember', remember, 'Remember my choice (you can change it in Settings)'),
+        el('div', 'buttons', dialogButton('Just this page', '', () => answer(false)), yes),
       );
       yes.focus();
     });
@@ -1316,44 +1354,25 @@
     if (settingsOpen) return;
     settingsOpen = true;
     const d = openDialog('Jiten for VNDB settings', () => { settingsOpen = false; });
-    const section = (title, ...kids) => el('div', 'margin:0 0 14px', el('div', 'font-weight:700;margin:0 0 4px', title), ...kids);
-    const check = (value, checked, ...label) => {
-      const c = el('input', 'margin:0');
-      c.type = 'checkbox';
-      c.value = value;
-      c.checked = checked;
-      return el('label', 'display:flex;gap:7px;align-items:center;margin:3px 0;cursor:pointer', c, ...label);
-    };
+    const section = (title, ...kids) => el('div', 'section', el('div', 'title', title), ...kids);
+    const check = (value, checked, ...label) => el('label', '', field('checkbox', { value, checked }), ...label);
 
     const pagesOff = (await getVal('pagesOff')) || [];
     const types = PAGE_TYPES.map(([value, label]) => check(value, !pagesOff.includes(value), label,
-      ...(value === pageType ? [el('span', 'opacity:.6', '(this page)')] : [])));
+      ...(value === pageType ? [el('span', 'dim', '(this page)')] : [])));
 
     const mode = (await getVal('loadMode')) || 'ask';
     const modes = [
       ['ask', 'Ask first, saying how many requests it takes (recommended)'],
       ['always', 'Load without asking'],
       ['never', 'Never: only sort the page I\'m on'],
-    ].map(([value, label]) => {
-      const r = el('input', 'margin:0');
-      r.type = 'radio';
-      r.name = 'jvl-load-mode';
-      r.value = value;
-      r.checked = value === mode;
-      return el('label', 'display:flex;gap:7px;align-items:center;margin:3px 0;cursor:pointer', r, label);
-    });
+    ].map(([value, label]) => el('label', '', field('radio', { name: 'jvl-load-mode', value, checked: value === mode }), label));
 
     const buttonRow = check('button', !buttonHidden, 'Show the sort button in the bottom-left corner');
     const showButton = buttonRow.querySelector('input');
 
     const oldKey = ((await getVal('apiKey')) || '').trim();
-    const key = el('input', 'width:100%;box-sizing:border-box;padding:5px 8px;border-radius:6px;border:1px solid #78909c;'
-      + 'background:#1c262b;color:#eceff1;font:inherit');
-    key.type = 'password';
-    key.value = oldKey;
-    key.placeholder = 'Paste your key here';
-    key.autocomplete = 'off';
-    key.spellcheck = false;
+    const key = field('password', { value: oldKey, placeholder: 'Paste your key here', autocomplete: 'off', spellcheck: false });
 
     const cached = await getVal('catalogue');
     const age = cached?.ts ? Math.round((Date.now() - cached.ts) / 60000) : null;
@@ -1378,25 +1397,24 @@
     };
 
     d.box.append(
-      heading('Jiten Difficulty for VNDB Lists'),
+      el('h2', '', 'Jiten Difficulty for VNDB Lists'),
       section('Show the Jiten column on', ...types,
-        small('Turning off the kind of page you\'re on reloads it.')),
+        note('Turning off the kind of page you\'re on reloads it.')),
       section('Sorting lists with several pages', ...modes,
-        small('Loading other pages counts toward VNDB\'s rate limit, together with your own browsing. '
+        note('Loading other pages counts toward VNDB\'s rate limit, together with your own browsing. '
           + 'Sorting up and down again afterwards is free.')),
       section('Floating button', buttonRow),
       section('Jiten API key (optional)', key,
-        small('Shows which titles that aren\'t on Jiten are already requested. Find it at ',
+        note('Shows which titles that aren\'t on Jiten are already requested. Find it at ',
           outLink('https://jiten.moe/settings', 'jiten.moe/settings'), ' → Advanced → API Key.')),
       section('Jiten data', el('div', '', ageText),
-        el('div', 'margin:6px 0 0', dialogButton('Download again now', BTN_PLAIN, async () => {
+        el('div', 'spaced', dialogButton('Download again now', '', async () => {
           for (const k of await listVals()) if (k === 'catalogue' || k.startsWith('req:')) await delVal(k);
           location.reload();
-        })), small('Reloads this page.')),
-      el('div', 'display:flex;gap:8px;justify-content:space-between;align-items:center;flex-wrap:wrap;'
-        + 'border-top:1px solid #455a64;padding-top:12px',
-      small(`Version ${CLIENT_NAME.split('/')[1]} · `, outLink('https://github.com/BeannieMoon/jiten-vndb-lists', 'GitHub')),
-      el('div', 'display:flex;gap:8px', dialogButton('Cancel', BTN_PLAIN, () => d.close()), dialogButton('Save', BTN_MAIN, save))),
+        })), note('Reloads this page.')),
+      el('div', 'foot',
+        note(`Version ${CLIENT_NAME.split('/')[1]} · `, outLink('https://github.com/BeannieMoon/jiten-vndb-lists', 'GitHub')),
+        el('div', 'buttons', dialogButton('Cancel', '', () => d.close()), dialogButton('Save', 'main', save))),
     );
   }
 
