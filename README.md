@@ -17,16 +17,22 @@ so you can see at a glance which visual novels are easy or hard to read in Japan
 - Adds a **Jiten** column to VNDB tables that have one row per VN:
   - your list (`/u…/ulist`), wishlist and votes;
   - the `/v` browse and search list;
+  - tag pages (`/g…`);
   - staff and voice-actor pages (`/s…`).
 - Shows difficulty as a **percentage** (Jiten's 0–5 scale), **colored** from green (beginner) to red (insane).
   Hover over it for the exact score, the difficulty name and the character count. Click it to open the deck on Jiten.
 - **Sorts** the list by difficulty with the ▴ ▾ arrows in the *Jiten* header, just like VNDB's other columns
   (▴ easiest first, ▾ hardest first). Titles that aren't on Jiten always go last.
-- **Sorts the whole list, not just one page.** If your list spans several pages, the first sort loads all of them
-  (up to 60 pages) into one table. Rows from the other pages keep working vote, label and date editors.
-  The `/v` browse list has over a thousand pages, so it is sorted one page at a time.
-- The floating button in the bottom-left corner sorts too and shows progress. Don't need it? Click its **×**.
-  The Tampermonkey menu (*Show or hide the floating Jiten button*) brings it back.
+- **Sorts the whole list, not just one page, and keeps the page tabs.** If your list spans several pages,
+  the first sort loads all of them (lists up to 4,000 titles), sorts everything together, and shows the result
+  in pages again, with tabs that look like VNDB's and switch instantly. Rows from other pages keep working vote,
+  label and date editors.
+- **Very long lists** (the `/v` browse list, big tag pages) are sorted by the titles that are on Jiten: VNDB's API
+  finds which titles in the list (with your filters) are on Jiten, and only those are loaded and sorted.
+  A **+ N not on Jiten ›** tab takes you back to VNDB's own order with everything.
+- A small spinner next to the *Jiten* header shows while anything loads. Hover over it for progress.
+- There's also an optional floating button in the bottom-left corner that sorts and shows progress.
+  It's off by default. Turn it on from the Tampermonkey menu (*Show or hide the floating Jiten button*); its **×** turns it off again.
 - **Fits every VNDB skin.** The colors adjust to your skin: light text on dark skins, dark text on light skins,
   and small colored tags on mid-tone skins where neither would be readable.
 - Marks titles that aren't on Jiten with a dim **NA**. With a Jiten API key set, titles that are already
@@ -41,6 +47,10 @@ so you can see at a glance which visual novels are easy or hard to read in Japan
 | Staff / VA page | Producer page |
 |---|---|
 | ![Staff page](screenshots/staff-page.png) | ![Producer page](screenshots/producer-page.png) |
+
+**Tag page** (Otome Game), the titles on Jiten sorted, in pages:
+
+![Tag page sorted by Jiten difficulty](screenshots/tag-page.png)
 
 | Light skin (Moe AI Shit) | Mid-tone skin (Saya no Uta) |
 |---|---|
@@ -74,7 +84,17 @@ It keeps that list for 24 hours, so later pages show their values instantly.
 After a day it shows the saved list straight away and refreshes it quietly in the background.
 To force a refresh, choose **Refresh Jiten data now** in the Tampermonkey menu.
 
-It only talks to `api.jiten.moe` and, to load the other pages of a list, `vndb.org` itself.
+It only talks to `api.jiten.moe`, and to `vndb.org` / `api.vndb.org` when a sort needs the rest of a list.
+
+**Gentle on both sites.** VNDB rate-limits by IP and counts your own browsing too, so the script:
+
+- loads list pages one at a time, 200 rows per request, with a 1.5-second pause in between
+  (a 1,000-title list is 5 requests; the whole browse list is about 15 plus a few API calls);
+- loads a list only when you sort it, and only once per visit;
+- backs off for 15 seconds or more if VNDB ever answers *429 Too Many Requests*, and gives up after a few tries.
+
+On the Jiten side, the catalogue is about 60 requests once a day. With an API key, the *already requested* check
+runs only for titles that come on screen, and each answer is kept for a week.
 
 ## Credits
 

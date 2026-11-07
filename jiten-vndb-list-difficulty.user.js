@@ -7,13 +7,14 @@
 // @supportURL   https://github.com/BeannieMoon/jiten-vndb-lists/issues
 // @downloadURL  https://raw.githubusercontent.com/BeannieMoon/jiten-vndb-lists/main/jiten-vndb-list-difficulty.user.js
 // @updateURL    https://raw.githubusercontent.com/BeannieMoon/jiten-vndb-lists/main/jiten-vndb-list-difficulty.user.js
-// @version      3.3.0
-// @description  Adds a Jiten difficulty column to VNDB lists (your ulist/wishlist/votes, the /v browse list, staff/VA pages) and shows it on producer pages, marks what isn't on Jiten (NA), and sorts by difficulty.
+// @version      3.4.0
+// @description  Adds a Jiten difficulty column to VNDB lists (your ulist/wishlist/votes, the /v browse list, tag pages, staff/VA pages) and shows it on producer pages, marks what isn't on Jiten (NA), and sorts by difficulty.
 // @match        https://vndb.org/v
 // @match        https://vndb.org/v?*
 // @match        https://vndb.org/u*
 // @match        https://vndb.org/p*
 // @match        https://vndb.org/s*
+// @match        https://vndb.org/g*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
@@ -31,15 +32,15 @@
 
   const JITEN = 'https://jiten.moe';
   const JITEN_API = 'https://api.jiten.moe/api';
-  const CLIENT_NAME = 'Jiten VNDB List Difficulty/3.3.0';
+  const CLIENT_NAME = 'Jiten VNDB List Difficulty/3.4.0';
   // Measured: 4-5 parallel requests is the fastest; more makes Jiten slower, and bursts get 429s.
   const CONCURRENCY = 4;
   const CATALOGUE_TTL = 24 * 60 * 60 * 1000;
   const REQUEST_TTL = 7 * 24 * 60 * 60 * 1000;
   const CATALOGUE_TYPES = [7, 6]; // visual novels, video games
-  // Load at most this many pages of a list to sort it whole (60 x 50 = 3,000 titles).
-  // The /v browse list has 1,000+ pages, so there sorting stays per page.
-  const MAX_LIST_PAGES = 60;
+  // Lists up to this size are loaded whole to sort them (200 rows per request, so at most 20
+  // requests). Longer lists (the /v browse list, tag pages) load only their titles on Jiten.
+  const MAX_LIST_TITLES = 4000;
   const DIFF_NAMES = ['Beginner', 'Easy', 'Average', 'Hard', 'Expert', 'Insane'];
   // VNDB has 23 skins, from black to white to mid-tone colors. The colors are picked to suit
   // the skin (see pickColors): light text on dark skins, dark text on light skins, and small
@@ -286,7 +287,7 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Sorting: the floating button and the column header both toggle it.
+  // Sorting: the ▴ ▾ links in the Jiten column header (and the optional floating button).
   // ---------------------------------------------------------------------------
 
   // complete: the catalogue is whole (cached or fully loaded); before that it may be partial.
@@ -295,31 +296,148 @@
   const sortableTables = new Set();
   const headerCells = new Map(); // table -> header cell
   let sortDir = null; // null | 'desc' | 'asc'
+  let pendingSort = null; // a sort clicked while the Jiten data was still loading
   let button = null;
 
+  const diffOf = (r) => (r.dataset.jvlDiff !== undefined ? parseFloat(r.dataset.jvlDiff) : null);
+  const compareRows = (dir) => (a, b) => {
+    const av = diffOf(a);
+    const bv = diffOf(b);
+    if (av == null && bv == null) return 0;
+    if (av == null) return 1; // not on Jiten: always last
+    if (bv == null) return -1;
+    return dir === 'desc' ? bv - av : av - bv;
+  };
+
+  // A multi-page list, once loaded and sorted, is shown in pages of the size VNDB uses, with
+  // tabs that look like VNDB's but switch pages here instead of reloading.
+  const view = { rows: null, page: 1, perPage: 50, restHref: null, restLabel: '' };
+
   function sortTable(table, dir) {
-    const body = table.tBodies[0] || table;
-    const rows = [...body.rows];
+    if (view.rows) {
+      view.rows.sort(compareRows(dir));
+      renderPage(table);
+      return;
+    }
     // Rows that aren't VN rows keep their place at the top.
-    const pinned = rows.filter((r) => !r.dataset.jvlRow);
-    const vnRows = rows.filter((r) => r.dataset.jvlRow);
-    const val = (r) => (r.dataset.jvlDiff !== undefined ? parseFloat(r.dataset.jvlDiff) : null);
-    vnRows.sort((a, b) => {
-      const av = val(a);
-      const bv = val(b);
-      if (av == null && bv == null) return 0;
-      if (av == null) return 1;
-      if (bv == null) return -1;
-      return dir === 'desc' ? bv - av : av - bv;
-    });
-    for (const r of [...pinned, ...vnRows]) body.appendChild(r);
+    const body = table.tBodies[0] || table;
+    for (const r of [...body.rows].filter((r) => r.dataset.jvlRow).sort(compareRows(dir))) body.appendChild(r);
   }
 
-  // Multi-page lists: VNDB shows 50 per page (200 at most), so sorting one page isn't
-  // enough for a 1,300-title list. The first sort click loads the other pages of the same
-  // list (same filters and columns) into this table, then sorts everything together.
-  const pages = { total: 1, current: 1, template: null, loading: false, loaded: false, done: 0, failed: 0 };
-  let vndbPausedUntil = 0; // VNDB answers bursts with 429 and no Retry-After
+  function renderPage(table) {
+    const body = table.tBodies[0] || table;
+    const pageCount = Math.max(1, Math.ceil(view.rows.length / view.perPage));
+    view.page = Math.min(Math.max(1, view.page), pageCount);
+    for (const r of [...body.rows]) if (r.dataset.jvlRow) r.remove();
+    const start = (view.page - 1) * view.perPage;
+    body.append(...view.rows.slice(start, start + view.perPage));
+    for (const nav of document.querySelectorAll('.browsetabs:not(.jvl-tabs)')) {
+      if (!nav.querySelector('a[href*="p="]')) continue;
+      nav.style.display = 'none';
+      let mine = nav.nextElementSibling;
+      if (!mine?.classList.contains('jvl-tabs')) {
+        mine = document.createElement(nav.tagName);
+        mine.className = 'browsetabs jvl-tabs';
+        nav.after(mine);
+      }
+      mine.replaceChildren(...tabItems(pageCount, table));
+    }
+  }
+
+  // Same markup as VNDB's own page tabs: ‹ previous 1 ⋯ 5 6 [7] 8 9 ⋯ 40 next ›
+  function tabItems(pageCount, table) {
+    const out = [];
+    const tab = (label, p, rel) => {
+      const li = document.createElement('li');
+      const a = document.createElement('a');
+      a.href = '#';
+      a.textContent = label;
+      if (rel) a.rel = rel; else if (p === view.page) a.className = 'highlightselected';
+      a.addEventListener('click', (e) => {
+        e.preventDefault();
+        view.page = p;
+        renderPage(table);
+        if (table.getBoundingClientRect().top < 0) table.scrollIntoView({ block: 'start' });
+      });
+      li.append(a);
+      out.push(li);
+    };
+    if (pageCount > 1) {
+      if (view.page > 1) tab('‹ previous', view.page - 1, 'prev');
+      const shown = [...new Set([1, pageCount, ...[-2, -1, 0, 1, 2].map((d) => view.page + d)])]
+        .filter((p) => p >= 1 && p <= pageCount).sort((a, b) => a - b);
+      let last = 0;
+      for (const p of shown) {
+        if (p > last + 1) {
+          const li = document.createElement('li');
+          li.className = 'ellipsis';
+          li.textContent = '⋯';
+          out.push(li);
+        }
+        tab(String(p), p);
+        last = p;
+      }
+      if (view.page < pageCount) tab('next ›', view.page + 1, 'next');
+    }
+    if (view.restHref) {
+      const li = document.createElement('li');
+      const a = document.createElement('a');
+      a.href = view.restHref;
+      a.textContent = view.restLabel;
+      a.title = 'Back to VNDB\'s own order, which includes the titles that aren\'t on Jiten';
+      li.append(a);
+      out.push(li);
+    }
+    return out;
+  }
+
+  // VNDB keeps a table's settings (sort, columns, results per page) in one number, the "s"
+  // parameter (same encoding as VNDB's own TableOpts code).
+  const RESULTS = [50, 10, 25, 100, 200];
+  const B64 = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-';
+  function tableOpts() {
+    try {
+      const v = pageWin.pageVars?.widget?.TableOpts?.[0]?.[1]?.value;
+      return typeof v === 'number' ? v : null;
+    } catch { return null; }
+  }
+
+  function readPerPage() {
+    const n = tableOpts();
+    if (n != null) return RESULTS[(n >> 2) & 7] || 50;
+    return parseInt(document.querySelector('.tableopts-results > a')?.textContent, 10) || 50;
+  }
+
+  // The same list (same filters, columns and sort) at 200 rows per page: a quarter of the requests.
+  function at200(url) {
+    const u = new URL(url);
+    const n = tableOpts();
+    if (n == null) return u;
+    let v = (n & ~28) | (4 << 2);
+    let enc = '';
+    do { enc = B64[v & 63] + enc; v = Math.floor(v / 64); } while (v > 0);
+    u.searchParams.set('s', enc);
+    return u;
+  }
+
+  // Loading the rest of a multi-page list. VNDB shows 50 per page by default, so sorting one
+  // page isn't enough: the first sort loads the other pages of the same list (same filters and
+  // columns). Lists too long for that (the /v browse list has 1,000+ pages) load only the
+  // titles that are on Jiten instead, found through VNDB's API.
+  const pages = { total: 1, current: 1, template: null, loading: false, loaded: false, progress: '', failed: 0 };
+  let fetchSeq = 0;
+
+  // VNDB rate-limits by IP, counting your own browsing too. So its pages are loaded one at a
+  // time with a pause in between, and a 429 (which comes with no Retry-After) pauses for longer.
+  const VNDB_GAP = 1500;
+  let vndbNext = 0;
+  let vndbPausedUntil = 0;
+  async function vndbTurn(gap) {
+    const at = Math.max(Date.now(), vndbNext, vndbPausedUntil);
+    vndbNext = at + gap;
+    const wait = at - Date.now();
+    if (wait > 0) await sleep(wait);
+  }
 
   function readPagination() {
     for (const a of document.querySelectorAll('.browsetabs a[href]')) {
@@ -333,17 +451,18 @@
     pages.total = Math.max(pages.total, pages.current);
   }
 
-  const canLoadAll = () => !pages.loaded && pages.template && pages.total > 1
-    && pages.total <= MAX_LIST_PAGES && sortableTables.size === 1;
+  const multiPage = () => !pages.loaded && pages.template && pages.total > 1 && sortableTables.size === 1;
+  const canLoadAll = () => multiPage() && pages.total * readPerPage() <= MAX_LIST_TITLES;
+  const canLoadJitenOnly = () => multiPage() && pages.total * readPerPage() > MAX_LIST_TITLES
+    && (location.pathname === '/v' || /^\/g\d+$/.test(location.pathname));
 
-  // One page of the list: its VN rows, plus the data VNDB needs to build the vote, label
-  // and date editors in those rows (page-level JSON, keyed by "widget<N>" element ids).
-  async function fetchPage(p) {
-    const u = new URL(pages.template);
+  // One page of a list: its VN rows, the number of pages, and the data VNDB needs to build
+  // the vote, label and date editors in those rows (page JSON keyed by "widget<N>" ids).
+  async function fetchPage(url, p) {
+    const u = new URL(url);
     u.searchParams.set('p', p);
     for (let attempt = 0; ; attempt++) {
-      const wait = vndbPausedUntil - Date.now();
-      if (wait > 0) await sleep(wait);
+      await vndbTurn(VNDB_GAP);
       // no-store: VNDB's 429 page is marked cacheable for months.
       const r = await fetch(u, { credentials: 'same-origin', cache: 'no-store' });
       if (r.ok) {
@@ -356,26 +475,43 @@
           .filter((tr) => tr.querySelector('td.tc_title a[href^="/v"], td.tc1 a[href^="/v"]'))
           .map((tr) => document.importNode(tr, true));
         const widgets = [];
+        const seq = ++fetchSeq;
         for (const tr of rows) {
           for (const el of tr.querySelectorAll('[id^="widget"]')) {
             const w = byId[el.id.slice(6)];
-            el.id = `jvl-p${p}-${el.id}`; // the same ids repeat on every page
+            el.id = `jvl-${seq}-${el.id}`; // the same ids repeat on every page
             if (w) widgets.push({ el, ...w });
           }
         }
-        return { rows, widgets };
+        let total = 1;
+        for (const a of doc.querySelectorAll('.browsetabs a[href]')) {
+          total = Math.max(total, parseInt(new URL(a.getAttribute('href'), u).searchParams.get('p'), 10) || 1);
+        }
+        return { rows, widgets, total };
       }
-      if (attempt >= 6) throw new Error(`VNDB page ${p}: ${r.status}`);
-      vndbPausedUntil = Math.max(vndbPausedUntil, Date.now() + (r.status === 429 ? 4000 : 1500) * (attempt + 1));
+      if (attempt >= 3) throw new Error(`VNDB page ${p}: ${r.status}`);
+      vndbPausedUntil = Math.max(vndbPausedUntil, Date.now() + (r.status === 429 ? 15000 : 3000) * (attempt + 1));
+    }
+  }
+
+  async function vndbApi(body) {
+    for (let attempt = 0; ; attempt++) {
+      await vndbTurn(500); // the API has its own, looser limit
+      const r = await fetch('https://api.vndb.org/kana/vn', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      if (r.ok) return r.json();
+      if (r.status !== 429 || attempt >= 3) throw new Error(`VNDB API: ${r.status}`);
+      await sleep(10000 * (attempt + 1));
     }
   }
 
   // Rows copied from other pages arrive as plain HTML. VNDB turns the vote, label and date
   // cells into editors with its own components (Mithril), set up once when the page loads,
   // so here the same components are taken from a row VNDB already set up and attached to the
-  // copied rows. They're attached as rows scroll near the screen, under one shared root,
-  // so a 2,000-title list stays fast. If anything about this fails, the copied rows simply
-  // keep VNDB's plain-text version of those cells.
+  // copied rows. They're attached as rows come near the screen, under one shared root, so a
+  // 2,000-title list stays fast. If anything about this fails, the copied rows simply keep
+  // VNDB's plain-text version of those cells.
   const pageWin = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const liveWidgets = new Set();
   let widgetsBroken = false;
@@ -436,47 +572,133 @@
     }
   }
 
-  async function loadAllPages() {
-    pages.loading = true;
-    updateButton();
-    const todo = [];
-    for (let p = 1; p <= pages.total; p++) if (p !== pages.current) todo.push(p);
-    const got = {};
-    let next = 0;
-    const worker = async () => {
-      while (next < todo.length) {
-        const p = todo[next++];
-        try { got[p] = await fetchPage(p); } catch { pages.failed++; }
-        pages.done++;
-        updateButton();
-      }
+  // Collects loaded rows in list order. A title that's already on this page keeps its own row
+  // (with VNDB's own editors) instead of the loaded copy.
+  const rowHref = (tr) => tr.querySelector('td.tc_title a[href^="/v"], td.tc1 a[href^="/v"]')?.getAttribute('href');
+  function collector(table) {
+    const own = new Map();
+    for (const r of [...(table.tBodies[0] || table).rows]) {
+      const h = r.dataset.jvlRow && rowHref(r);
+      if (h && !own.has(h)) own.set(h, r);
+    }
+    const used = new Set();
+    const c = {
+      rows: [],
+      widgets: [],
+      take(res) {
+        const skipped = new Set();
+        for (const tr of res.rows) {
+          const mine = own.get(rowHref(tr));
+          if (mine && !used.has(mine)) { used.add(mine); skipped.add(tr); c.rows.push(mine); } else c.rows.push(tr);
+        }
+        c.widgets.push(...res.widgets.filter((w) => !skipped.has(w.el.closest('tr'))));
+      },
+      unused: () => [...own.values()].filter((r) => !used.has(r)),
     };
-    await Promise.all([worker(), worker()]); // gentle on VNDB
-    const table = [...sortableTables][0];
+    return c;
+  }
+
+  // Puts the loaded rows in the table once (so they get their Jiten cell and editors), then
+  // switches the table to the paged view.
+  function adoptRows(table, rows, widgets) {
     const body = table.tBodies[0] || table;
-    const firstOwn = body.querySelector('tr[data-jvl-row]');
-    const widgets = [];
-    for (const p of todo) {
-      if (!got[p]) continue;
-      for (const tr of got[p].rows) {
-        if (p < pages.current && firstOwn) firstOwn.before(tr); else body.append(tr);
-      }
-      widgets.push(...got[p].widgets);
-    }
-    for (const nav of document.querySelectorAll('.browsetabs')) {
-      if (nav.querySelector('a[href*="p="]')) nav.style.display = 'none';
-    }
-    pages.loading = false;
-    pages.loaded = true;
-    scan(); // adds the Jiten cell to the new rows
+    body.append(...rows.filter((r) => !r.isConnected));
+    scan();
     attachWidgets(widgets);
+    view.perPage = readPerPage();
+    view.page = 1;
+    view.rows = rows.filter((r) => r.dataset.jvlRow);
+  }
+
+  async function loadAllPages(table) {
+    const c = collector(table);
+    const url = at200(pages.template);
+    let total = null;
+    for (let p = 1; p <= (total || 1); p++) {
+      pages.progress = `Loading the whole list (${p}/${total || '?'})\u2026`;
+      updateButton();
+      try {
+        const res = await fetchPage(url, p);
+        if (total == null) total = Math.min(res.total, Math.ceil(MAX_LIST_TITLES / 10));
+        c.take(res);
+      } catch {
+        pages.failed++;
+        if (total == null) break;
+      }
+    }
+    adoptRows(table, [...c.rows, ...c.unused()], c.widgets);
+  }
+
+  async function loadJitenTitles(table) {
+    const here = new URL(location.href);
+    here.searchParams.delete('p');
+    const f = here.searchParams.get('f');
+    const parts = [];
+    if (f) {
+      const n = (await vndbApi({ filters: f, normalized_filters: true, results: 0 })).normalized_filters;
+      if (Array.isArray(n) && n.length) parts.push(n);
+    }
+    const q = here.searchParams.get('q')?.trim();
+    if (q) parts.push(['search', '=', q]);
+    // A tag page (/g…) lists the VNs with that tag, at the spoiler level picked on the page.
+    // Its own filter box (f) works like /v's, so the same narrowed filter works there too.
+    const tag = /^\/(g\d+)$/.exec(here.pathname)?.[1];
+    if (tag) {
+      const spoil = parseInt(document.querySelector('.browseopts button.optselected[name="m"]')?.value, 10) || 0;
+      parts.push(['tag', '=', [tag, spoil, 0]]);
+    }
+    // Only titles with a difficulty matter here: everything else sorts last anyway.
+    const ids = Object.keys(state.catalogue).filter((v) => state.catalogue[v][1] != null && state.catalogue[v][1] >= 0);
+    const batches = [];
+    for (let i = 0; i < ids.length; i += 300) batches.push(ids.slice(i, i + 300)); // the API's limit is a bit higher
+    const c = collector(table);
+    for (let i = 0; i < batches.length; i++) {
+      pages.progress = `Finding the titles in this list that are on Jiten (${i}/${batches.length})…`;
+      updateButton();
+      const byId = ['or', ...batches[i].map((v) => ['id', '=', v])];
+      const r = await vndbApi({ filters: parts.length ? ['and', ...parts, byId] : byId, results: 0, count: true, compact_filters: true });
+      if (!r.count) continue;
+      const u = at200(here);
+      u.searchParams.set('f', r.compact_filters);
+      try {
+        for (let p = 1, total = 1; p <= total; p++) {
+          const res = await fetchPage(u, p);
+          total = res.total;
+          c.take(res);
+        }
+      } catch { pages.failed++; }
+    }
+    for (const r of c.unused()) r.remove(); // not on Jiten
+    const rows = c.rows;
+    const total = parseInt((document.body.innerText.match(/([\d,]+) results/) || [])[1]?.replace(/,/g, ''), 10);
+    view.restHref = here.pathname + here.search;
+    view.restLabel = total > rows.length ? `+ ${fmt(total - rows.length)} not on Jiten ›` : 'VNDB order ›';
+    adoptRows(table, rows, c.widgets);
   }
 
   async function applySort(dir) {
     if (!sortableTables.size || pages.loading) return;
-    if (canLoadAll()) await loadAllPages();
+    if (!state.complete) { // sort as soon as the Jiten data is in
+      pendingSort = dir;
+      updateButton();
+      return;
+    }
+    const table = [...sortableTables][0];
+    if (canLoadAll() || canLoadJitenOnly()) {
+      pages.loading = true;
+      updateButton();
+      try {
+        if (canLoadAll()) await loadAllPages(table); else await loadJitenTitles(table);
+      } catch (e) {
+        console.warn('[Jiten VNDB] could not load the whole list:', e);
+        pages.failed++;
+      }
+      pages.loading = false;
+      pages.loaded = true;
+    }
     if (!sortDir) for (const t of sortableTables) releaseVndbSort(t);
     sortDir = dir;
+    view.page = 1;
     for (const t of sortableTables) sortTable(t, sortDir);
     updateButton();
   }
@@ -514,7 +736,7 @@
   }
 
   // The column header looks like VNDB's own ("Vote ▴▾": links, the active direction as plain
-  // text) and also shows loading progress and errors, so the floating button can be hidden.
+  // text), with VNDB's spinner next to it while anything is loading.
   function link(text, title, onClick) {
     const a = document.createElement('a');
     a.href = '#';
@@ -524,6 +746,15 @@
     return a;
   }
 
+  function busyText() {
+    if (state.error) return null;
+    if (!state.complete) return `Loading Jiten data (${state.catDone}/${state.catTotal || '?'})…`
+      + (pendingSort ? ' The list sorts as soon as it\'s in.' : '');
+    if (pages.loading) return pages.progress;
+    if (state.reqTotal > state.reqDone) return `Checking which titles are already requested on Jiten (${state.reqDone}/${state.reqTotal})…`;
+    return null;
+  }
+
   function renderHeader(h) {
     h.textContent = 'Jiten ';
     h.removeAttribute('title');
@@ -531,45 +762,45 @@
       h.append(link('⚠', `Jiten: ${state.error.message} — click to retry`, start));
       return;
     }
-    const busy = !state.complete ? [`${state.catDone}/${state.catTotal || '?'}`, 'Loading Jiten data…']
-      : pages.loading ? [`${pages.done}/${pages.total - 1}`, 'Loading the other pages of this list…'] : null;
+    const note = canLoadAll() ? ` (loads all ${pages.total} pages of this list)`
+      : canLoadJitenOnly() ? ' (sorts the titles in this list that are on Jiten)'
+        : pages.total > 1 && !pages.loaded ? ' (this page only)' : '';
+    for (const [dir, arrow, label] of [['asc', '▴', 'Easiest first'], ['desc', '▾', 'Hardest first']]) {
+      h.append(sortDir === dir ? arrow : link(arrow, label + note, () => applySort(dir)));
+    }
+    const busy = busyText();
     if (busy) {
-      const s = document.createElement('small');
-      s.textContent = busy[0] + ' ';
-      s.title = busy[1];
+      const s = document.createElement('span');
+      s.className = 'spinner';
+      s.title = busy;
+      s.style.cssText = 'display:inline-block;vertical-align:middle;margin-left:6px;width:12px;height:12px';
       h.append(s);
     }
-    const all = canLoadAll() ? ` (loads all ${pages.total} pages)` : '';
-    for (const [dir, arrow, label] of [['asc', '▴', 'Easiest first'], ['desc', '▾', 'Hardest first']]) {
-      h.append(sortDir === dir ? arrow : link(arrow, label + all, () => { if (state.error) start(); else applySort(dir); }));
-    }
-    if (pages.failed) h.title = `${pages.failed} page(s) of this list failed to load`;
+    if (pages.failed) h.title = 'Part of this list failed to load from VNDB';
   }
 
   function updateButton() {
     for (const h of headerCells.values()) renderHeader(h);
     if (!button) return;
     let text;
+    const busy = busyText();
     if (state.error) text = `⚠ Jiten: ${state.error.message} — click to retry`;
-    else if (!state.complete) text = `⇅ Jiten % — loading ${state.catDone}/${state.catTotal || '?'}`;
-    else if (pages.loading) text = `⇅ Jiten % — loading list pages ${pages.done}/${pages.total - 1}`;
+    else if (busy && (!state.complete || pages.loading)) text = `⇅ Jiten % — ${busy}`;
     else {
       let label = sortDir === 'desc' ? 'hardest first ▼' : sortDir === 'asc' ? 'easiest first ▲' : 'click to sort';
-      if (!sortDir && canLoadAll()) label += ` all ${pages.total} pages`;
-      if (sortableTables.size && pages.total > MAX_LIST_PAGES) label += ' (this page only)';
-      if (pages.loaded) label += ` · ${fmt(items.filter((i) => i.tr).length)} titles`;
-      if (pages.failed) label += ` · ${pages.failed} page(s) failed to load`;
+      if (view.rows) label += ` · ${fmt(view.rows.length)} titles`;
+      else if (sortableTables.size && pages.total > 1 && !canLoadAll() && !canLoadJitenOnly()) label += ' (this page only)';
+      if (pages.failed) label += ' · part of the list failed to load';
       text = sortableTables.size ? `⇅ Jiten % — ${label}` : '⇅ Jiten % — loaded';
     }
-    if (state.reqTotal > state.reqDone) text += `  (checking requests ${state.reqDone}/${state.reqTotal})`;
     button.textContent = text;
     button.style.cursor = state.error || sortableTables.size ? 'pointer' : 'default';
   }
 
-  // The floating button (bottom left). Its × hides it for good; the Tampermonkey menu
-  // brings it back.
+  // The floating button (bottom left) is off by default: the header does the same job.
+  // The Tampermonkey menu turns it on; its × turns it off again.
   let buttonBox = null;
-  let buttonHidden = false;
+  let buttonHidden = true;
   let pagesRead = false;
 
   function ensureButton() {
@@ -589,7 +820,7 @@
     close.textContent = '×';
     close.title = 'Hide this button (the Jiten column header sorts too). Bring it back from the Tampermonkey menu.';
     close.style.cssText = base + 'padding:7px 10px 7px 6px;opacity:.6;font-size:14px;line-height:1';
-    close.addEventListener('click', () => { setVal('hideButton', true); removeButton(); });
+    close.addEventListener('click', () => { setVal('showButton', false); removeButton(); });
     buttonBox.append(button, close);
     document.body.append(buttonBox);
     updateButton();
@@ -639,6 +870,32 @@
     const hit = state.catalogue[item.vid];
     if (hit) { show(item, foundResult(hit)); return; }
     if (!state.key) { show(item, { state: 'missing-unchecked' }); return; }
+    checkWhenVisible(item);
+  }
+
+  // One request to Jiten per title, so only for titles that come on screen: a 1,000-title list
+  // that isn't on Jiten shouldn't mean 1,000 requests at once. Answers are kept for a week.
+  let checkObserver = null;
+  const waitingChecks = new Map();
+  function checkWhenVisible(item) {
+    const target = item.tr || item.holder;
+    if (!checkObserver) {
+      checkObserver = new IntersectionObserver((entries) => {
+        for (const e of entries) {
+          if (!e.isIntersecting) continue;
+          checkObserver.unobserve(e.target);
+          const it = waitingChecks.get(e.target);
+          waitingChecks.delete(e.target);
+          if (it) checkRequest(it);
+        }
+      }, { rootMargin: '400px 0px' });
+    }
+    waitingChecks.set(target, item);
+    checkObserver.observe(target);
+  }
+
+  function checkRequest(item) {
+    if (item.done) return;
     state.reqTotal++;
     updateButton();
     requestShared(item.vid, item.title, state.key)
@@ -711,6 +968,7 @@
       updateButton();
       for (const item of items) if (!item.done) settle(item);
       if (Date.now() - cached.ts > CATALOGUE_TTL) refreshInBackground();
+      runPendingSort();
       return;
     }
     try {
@@ -729,6 +987,14 @@
     }
     updateButton();
     for (const item of items) if (!item.done) settle(item);
+    runPendingSort();
+  }
+
+  function runPendingSort() {
+    const dir = pendingSort;
+    pendingSort = null;
+    if (dir && state.complete) applySort(dir);
+    else updateButton();
   }
 
   async function refreshInBackground() {
@@ -751,7 +1017,7 @@
   });
   menu('Show or hide the floating Jiten button', async () => {
     const hide = !buttonHidden;
-    await setVal('hideButton', hide);
+    await setVal('showButton', !hide);
     if (hide) removeButton();
     else { buttonHidden = false; if (items.length) ensureButton(); }
   });
@@ -766,7 +1032,7 @@
   })();
 
   (async () => {
-    buttonHidden = !!(await getVal('hideButton'));
+    buttonHidden = (await getVal('showButton')) !== true;
     if (scan()) start();
     let debounce = null;
     new MutationObserver(() => {
