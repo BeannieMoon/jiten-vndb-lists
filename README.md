@@ -20,11 +20,15 @@ so you can see at a glance which visual novels are easy or hard to read in Japan
   - staff and voice-actor pages (`/s…`).
 - Shows difficulty as a **percentage** (Jiten's 0–5 scale), **colored** from green (beginner) to red (insane).
   Hover over it for the exact score, the difficulty name and the character count. Click it to open the deck on Jiten.
-- **Sorts** the list by difficulty. Click the *Jiten* column header or the floating button in the bottom-left corner
-  (the first click sorts hardest first, the next easiest first).
-  Titles that aren't on Jiten always go last.
+- **Sorts** the list by difficulty with the ▴ ▾ arrows in the *Jiten* header, just like VNDB's other columns
+  (▴ easiest first, ▾ hardest first). Titles that aren't on Jiten always go last.
 - **Sorts the whole list, not just one page.** If your list spans several pages, the first sort loads all of them
-  (up to 60 pages) into one table. The `/v` browse list has over a thousand pages, so it is sorted one page at a time.
+  (up to 60 pages) into one table. Rows from the other pages keep working vote, label and date editors.
+  The `/v` browse list has over a thousand pages, so it is sorted one page at a time.
+- The floating button in the bottom-left corner sorts too and shows progress. Don't need it? Click its **×**.
+  The Tampermonkey menu (*Show or hide the floating Jiten button*) brings it back.
+- **Fits every VNDB skin.** The colors adjust to your skin: light text on dark skins, dark text on light skins,
+  and small colored tags on mid-tone skins where neither would be readable.
 - Marks titles that aren't on Jiten with a dim **NA**. With a Jiten API key set, titles that are already
   **requested** show **req.** instead.
 - On producer pages (`/p…`), VNDB lists each VN with its releases underneath, so the value goes next to the VN title
@@ -38,6 +42,10 @@ so you can see at a glance which visual novels are easy or hard to read in Japan
 |---|---|
 | ![Staff page](screenshots/staff-page.png) | ![Producer page](screenshots/producer-page.png) |
 
+| Light skin (Moe AI Shit) | Mid-tone skin (Saya no Uta) |
+|---|---|
+| ![Light skin](screenshots/skin-light.png) | ![Mid-tone skin](screenshots/skin-midtone.png) |
+
 ## Install
 
 1. Install a userscript manager such as [Tampermonkey](https://www.tampermonkey.net/) or
@@ -48,6 +56,9 @@ so you can see at a glance which visual novels are easy or hard to read in Japan
 
 On Chrome and Edge, Tampermonkey may also need *Allow user scripts* (or *Developer mode*) switched on
 in the browser's extension settings.
+
+Installed an older version before this repository existed? It won't update by itself. Open the link above once
+and click *Reinstall* / *Update*.
 
 ## Optional: Jiten API key
 

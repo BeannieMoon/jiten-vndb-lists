@@ -7,7 +7,7 @@
 // @supportURL   https://github.com/BeannieMoon/jiten-vndb-lists/issues
 // @downloadURL  https://raw.githubusercontent.com/BeannieMoon/jiten-vndb-lists/main/jiten-vndb-list-difficulty.user.js
 // @updateURL    https://raw.githubusercontent.com/BeannieMoon/jiten-vndb-lists/main/jiten-vndb-list-difficulty.user.js
-// @version      3.2.0
+// @version      3.3.0
 // @description  Adds a Jiten difficulty column to VNDB lists (your ulist/wishlist/votes, the /v browse list, staff/VA pages) and shows it on producer pages, marks what isn't on Jiten (NA), and sorts by difficulty.
 // @match        https://vndb.org/v
 // @match        https://vndb.org/v?*
@@ -21,6 +21,8 @@
 // @grant        GM_deleteValue
 // @grant        GM_listValues
 // @grant        GM_registerMenuCommand
+// @grant        unsafeWindow
+// @sandbox      JavaScript
 // @connect      api.jiten.moe
 // ==/UserScript==
 
@@ -29,7 +31,7 @@
 
   const JITEN = 'https://jiten.moe';
   const JITEN_API = 'https://api.jiten.moe/api';
-  const CLIENT_NAME = 'Jiten VNDB List Difficulty/3.2.0';
+  const CLIENT_NAME = 'Jiten VNDB List Difficulty/3.3.0';
   // Measured: 4-5 parallel requests is the fastest; more makes Jiten slower, and bursts get 429s.
   const CONCURRENCY = 4;
   const CATALOGUE_TTL = 24 * 60 * 60 * 1000;
@@ -39,8 +41,53 @@
   // The /v browse list has 1,000+ pages, so there sorting stays per page.
   const MAX_LIST_PAGES = 60;
   const DIFF_NAMES = ['Beginner', 'Easy', 'Average', 'Hard', 'Expert', 'Insane'];
-  // Light enough to read as plain text on VNDB's dark theme.
-  const DIFF_COLORS = ['#66bb6a', '#9ccc65', '#e6c84a', '#ffa726', '#ff7043', '#ef5350'];
+  // VNDB has 23 skins, from black to white to mid-tone colors. The colors are picked to suit
+  // the skin (see pickColors): light text on dark skins, dark text on light skins, and small
+  // colored chips on mid-tone skins where neither kind of text would be readable.
+  const LIGHT_TEXT = { diff: ['#66bb6a', '#9ccc65', '#e6c84a', '#ffa726', '#ff7043', '#ef5350'], req: '#c9a88f' };
+  const DARK_TEXT = { diff: ['#1b5e20', '#33691e', '#6d5200', '#a33c00', '#a52a0a', '#9b1111'], req: '#6b4f3a' };
+  let colors = { mode: 'text', ...LIGHT_TEXT };
+
+  // The color actually behind an element: its background layers composited down to the
+  // first opaque one (VNDB skins use semi-transparent boxes over a background image).
+  function backgroundOf(el) {
+    const layers = [];
+    for (let e = el; e; e = e.parentElement) {
+      const m = getComputedStyle(e).backgroundColor.match(/[\d.]+/g);
+      if (!m) continue;
+      const [r, g, b, a = 1] = m.map(Number);
+      if (a === 0) continue;
+      layers.push([r, g, b, a]);
+      if (a >= 1) break;
+    }
+    let c = [255, 255, 255];
+    for (const [r, g, b, a] of layers.reverse()) c = [r, g, b].map((v, i) => v * a + c[i] * (1 - a));
+    return c;
+  }
+
+  const luminance = (rgb) => {
+    const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
+    return 0.2126 * f(rgb[0]) + 0.7152 * f(rgb[1]) + 0.0722 * f(rgb[2]);
+  };
+  const hexRgb = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+  const contrast = (a, b) => {
+    const [x, y] = [luminance(a), luminance(b)].sort((p, q) => q - p);
+    return (x + 0.05) / (y + 0.05);
+  };
+
+  let colorsPicked = false;
+  function pickColors(el) {
+    if (colorsPicked || !el) return;
+    colorsPicked = true;
+    // Table rows alternate between two stripes, which on some skins differ a lot: check both.
+    const tr = el.closest('tr');
+    const bgs = [backgroundOf(el), ...(tr?.nextElementSibling ? [backgroundOf(tr.nextElementSibling)] : [])];
+    const worst = (set) => Math.min(...[...set.diff, set.req].flatMap((c) => bgs.map((bg) => contrast(hexRgb(c), bg))));
+    // 3.5 rather than 3, to leave some margin over the background image behind the boxes.
+    if (worst(LIGHT_TEXT) >= 3.5) colors = { mode: 'text', ...LIGHT_TEXT };
+    else if (worst(DARK_TEXT) >= 3.5) colors = { mode: 'text', ...DARK_TEXT };
+    else colors = { mode: 'chip', ...LIGHT_TEXT };
+  }
 
   const GM4 = typeof GM === 'object' && GM ? GM : null;
   const gmXhr = typeof GM_xmlhttpRequest === 'function' ? GM_xmlhttpRequest
@@ -194,7 +241,11 @@
     b.style.cssText = 'text-decoration:none;white-space:nowrap;font-size:0.92em;' + (inline ? 'margin-left:6px;' : '');
     let diff = null;
     const set = (color, text, title, href, { bold = false, dim = false } = {}) => {
-      b.style.color = color || 'inherit';
+      if (color && colors.mode === 'chip') {
+        b.style.cssText += `background:${color};color:#111;padding:0 5px;border-radius:4px;`;
+      } else {
+        b.style.color = color || 'inherit';
+      }
       if (bold) b.style.fontWeight = '700';
       if (dim) b.style.opacity = '0.45';
       b.textContent = text;
@@ -210,7 +261,7 @@
         if (raw != null && raw >= 0) {
           const band = Math.min(Math.max(Math.floor(raw), 0), 5);
           diff = raw;
-          set(DIFF_COLORS[band], `${pct(raw)}%${mark}`, `Jiten difficulty ${raw.toFixed(1)}/5 · ${DIFF_NAMES[band]}`
+          set(colors.diff[band], `${pct(raw)}%${mark}`, `Jiten difficulty ${raw.toFixed(1)}/5 · ${DIFF_NAMES[band]}`
             + (result.characterCount ? ` · ${fmt(result.characterCount)} characters` : '') + note, href, { bold: true });
         } else {
           set(null, `on Jiten${mark}`, 'On Jiten, no difficulty rating yet' + note, href, { dim: true });
@@ -218,7 +269,7 @@
         break;
       }
       case 'requested':
-        set('#c9a88f', 'req.', 'Not on Jiten yet, but already requested',
+        set(colors.req, 'req.', 'Not on Jiten yet, but already requested',
           result.requestId ? `${JITEN}/requests/${result.requestId}` : `${JITEN}/requests`);
         break;
       case 'missing':
@@ -268,6 +319,7 @@
   // enough for a 1,300-title list. The first sort click loads the other pages of the same
   // list (same filters and columns) into this table, then sorts everything together.
   const pages = { total: 1, current: 1, template: null, loading: false, loaded: false, done: 0, failed: 0 };
+  let vndbPausedUntil = 0; // VNDB answers bursts with 429 and no Retry-After
 
   function readPagination() {
     for (const a of document.querySelectorAll('.browsetabs a[href]')) {
@@ -284,19 +336,103 @@
   const canLoadAll = () => !pages.loaded && pages.template && pages.total > 1
     && pages.total <= MAX_LIST_PAGES && sortableTables.size === 1;
 
-  async function fetchPageRows(p) {
+  // One page of the list: its VN rows, plus the data VNDB needs to build the vote, label
+  // and date editors in those rows (page-level JSON, keyed by "widget<N>" element ids).
+  async function fetchPage(p) {
     const u = new URL(pages.template);
     u.searchParams.set('p', p);
     for (let attempt = 0; ; attempt++) {
-      const r = await fetch(u, { credentials: 'same-origin' });
+      const wait = vndbPausedUntil - Date.now();
+      if (wait > 0) await sleep(wait);
+      // no-store: VNDB's 429 page is marked cacheable for months.
+      const r = await fetch(u, { credentials: 'same-origin', cache: 'no-store' });
       if (r.ok) {
         const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
-        return [...doc.querySelectorAll('table.stripe tr')]
+        let widgetData = {};
+        try { widgetData = JSON.parse(doc.getElementById('pagevars')?.textContent || '{}').widget || {}; } catch { /* none */ }
+        const byId = {};
+        for (const [name, entries] of Object.entries(widgetData)) for (const [id, data] of entries) byId[id] = { name, data };
+        const rows = [...doc.querySelectorAll('table.stripe tr')]
           .filter((tr) => tr.querySelector('td.tc_title a[href^="/v"], td.tc1 a[href^="/v"]'))
           .map((tr) => document.importNode(tr, true));
+        const widgets = [];
+        for (const tr of rows) {
+          for (const el of tr.querySelectorAll('[id^="widget"]')) {
+            const w = byId[el.id.slice(6)];
+            el.id = `jvl-p${p}-${el.id}`; // the same ids repeat on every page
+            if (w) widgets.push({ el, ...w });
+          }
+        }
+        return { rows, widgets };
       }
-      if (attempt >= 3) throw new Error(`VNDB page ${p}: ${r.status}`);
-      await sleep(1500 * (attempt + 1));
+      if (attempt >= 6) throw new Error(`VNDB page ${p}: ${r.status}`);
+      vndbPausedUntil = Math.max(vndbPausedUntil, Date.now() + (r.status === 429 ? 4000 : 1500) * (attempt + 1));
+    }
+  }
+
+  // Rows copied from other pages arrive as plain HTML. VNDB turns the vote, label and date
+  // cells into editors with its own components (Mithril), set up once when the page loads,
+  // so here the same components are taken from a row VNDB already set up and attached to the
+  // copied rows. They're attached as rows scroll near the screen, under one shared root,
+  // so a 2,000-title list stays fast. If anything about this fails, the copied rows simply
+  // keep VNDB's plain-text version of those cells.
+  const pageWin = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+  const liveWidgets = new Set();
+  let widgetsBroken = false;
+  let widgetRoot = null;
+
+  function attachWidgets(list) {
+    try {
+      const m = pageWin.m;
+      const widgetPages = pageWin.pageVars?.widget;
+      if (typeof m !== 'function' || typeof m.mount !== 'function' || !widgetPages) return;
+      const components = {};
+      for (const [name, entries] of Object.entries(widgetPages)) {
+        for (const [id] of entries) {
+          const vnodes = pageWin.document.getElementById('widget' + id)?.vnodes;
+          const tag = (Array.isArray(vnodes) ? vnodes[0] : vnodes)?.instance?.tag;
+          if (tag) { components[name] = tag; break; }
+        }
+      }
+      const byRow = new Map();
+      for (const w of list) {
+        const component = components[w.name];
+        const tr = w.el.closest('tr');
+        if (!component || !tr) continue;
+        if (!byRow.has(tr)) byRow.set(tr, []);
+        byRow.get(tr).push({ el: w.el, component, attrs: { data: w.data, oldContents: Array.from(w.el.childNodes) } });
+      }
+      if (!byRow.size) return;
+      if (!widgetRoot) {
+        widgetRoot = document.createElement('div');
+        widgetRoot.hidden = true;
+        document.body.append(widgetRoot);
+        m.mount(widgetRoot, {
+          view: () => {
+            if (widgetsBroken) return null;
+            try {
+              for (const w of liveWidgets) m.render(w.el, m(w.component, w.attrs), m.redraw);
+            } catch (e) {
+              widgetsBroken = true; // never let this break VNDB's own redraws
+              console.warn('[Jiten VNDB] could not set up editors on loaded rows:', e);
+            }
+            return null;
+          },
+        });
+      }
+      const io = new IntersectionObserver((entries) => {
+        let added = false;
+        for (const e of entries) {
+          if (!e.isIntersecting) continue;
+          io.unobserve(e.target);
+          for (const w of byRow.get(e.target) || []) liveWidgets.add(w);
+          added = true;
+        }
+        if (added) m.redraw();
+      }, { rootMargin: '800px 0px' });
+      for (const tr of byRow.keys()) io.observe(tr);
+    } catch (e) {
+      console.warn('[Jiten VNDB] could not set up editors on loaded rows:', e);
     }
   }
 
@@ -310,7 +446,7 @@
     const worker = async () => {
       while (next < todo.length) {
         const p = todo[next++];
-        try { got[p] = await fetchPageRows(p); } catch { pages.failed++; }
+        try { got[p] = await fetchPage(p); } catch { pages.failed++; }
         pages.done++;
         updateButton();
       }
@@ -319,10 +455,13 @@
     const table = [...sortableTables][0];
     const body = table.tBodies[0] || table;
     const firstOwn = body.querySelector('tr[data-jvl-row]');
+    const widgets = [];
     for (const p of todo) {
-      for (const tr of got[p] || []) {
+      if (!got[p]) continue;
+      for (const tr of got[p].rows) {
         if (p < pages.current && firstOwn) firstOwn.before(tr); else body.append(tr);
       }
+      widgets.push(...got[p].widgets);
     }
     for (const nav of document.querySelectorAll('.browsetabs')) {
       if (nav.querySelector('a[href*="p="]')) nav.style.display = 'none';
@@ -330,14 +469,38 @@
     pages.loading = false;
     pages.loaded = true;
     scan(); // adds the Jiten cell to the new rows
+    attachWidgets(widgets);
   }
 
-  async function toggleSort() {
+  async function applySort(dir) {
     if (!sortableTables.size || pages.loading) return;
     if (canLoadAll()) await loadAllPages();
-    sortDir = sortDir === 'desc' ? 'asc' : 'desc';
+    if (!sortDir) for (const t of sortableTables) releaseVndbSort(t);
+    sortDir = dir;
     for (const t of sortableTables) sortTable(t, sortDir);
     updateButton();
+  }
+
+  const toggleSort = () => applySort(sortDir === 'desc' ? 'asc' : 'desc');
+  const onSortClick = () => { if (state.error) start(); else toggleSort(); };
+
+  // VNDB shows the active sort as a plain arrow (e.g. "Title ▴"). Once the rows are sorted by
+  // Jiten instead, turn that arrow back into a link, so every column can be re-sorted by VNDB.
+  function releaseVndbSort(table) {
+    const href = new URL(location.href);
+    href.searchParams.delete('p');
+    for (const cell of table.tHead?.rows[0]?.cells || []) {
+      if (cell.classList.contains('tc_jiten')) continue;
+      for (const node of [...cell.childNodes]) {
+        const m = node.nodeType === 3 && /^(.*?)([▴▾])\s*$/s.exec(node.textContent);
+        if (!m) continue;
+        const a = document.createElement('a');
+        a.href = href.pathname + href.search;
+        a.textContent = m[2];
+        node.textContent = m[1];
+        node.after(a);
+      }
+    }
   }
 
   let resortQueued = false;
@@ -350,9 +513,41 @@
     });
   }
 
+  // The column header looks like VNDB's own ("Vote ▴▾": links, the active direction as plain
+  // text) and also shows loading progress and errors, so the floating button can be hidden.
+  function link(text, title, onClick) {
+    const a = document.createElement('a');
+    a.href = '#';
+    a.textContent = text;
+    a.title = title;
+    a.addEventListener('click', (e) => { e.preventDefault(); onClick(); });
+    return a;
+  }
+
+  function renderHeader(h) {
+    h.textContent = 'Jiten ';
+    h.removeAttribute('title');
+    if (state.error) {
+      h.append(link('⚠', `Jiten: ${state.error.message} — click to retry`, start));
+      return;
+    }
+    const busy = !state.complete ? [`${state.catDone}/${state.catTotal || '?'}`, 'Loading Jiten data…']
+      : pages.loading ? [`${pages.done}/${pages.total - 1}`, 'Loading the other pages of this list…'] : null;
+    if (busy) {
+      const s = document.createElement('small');
+      s.textContent = busy[0] + ' ';
+      s.title = busy[1];
+      h.append(s);
+    }
+    const all = canLoadAll() ? ` (loads all ${pages.total} pages)` : '';
+    for (const [dir, arrow, label] of [['asc', '▴', 'Easiest first'], ['desc', '▾', 'Hardest first']]) {
+      h.append(sortDir === dir ? arrow : link(arrow, label + all, () => { if (state.error) start(); else applySort(dir); }));
+    }
+    if (pages.failed) h.title = `${pages.failed} page(s) of this list failed to load`;
+  }
+
   function updateButton() {
-    const arrow = sortDir === 'desc' ? ' ▼' : sortDir === 'asc' ? ' ▲' : '';
-    for (const h of headerCells.values()) h.textContent = 'Jiten' + arrow;
+    for (const h of headerCells.values()) renderHeader(h);
     if (!button) return;
     let text;
     if (state.error) text = `⚠ Jiten: ${state.error.message} — click to retry`;
@@ -371,18 +566,40 @@
     button.style.cursor = state.error || sortableTables.size ? 'pointer' : 'default';
   }
 
+  // The floating button (bottom left). Its × hides it for good; the Tampermonkey menu
+  // brings it back.
+  let buttonBox = null;
+  let buttonHidden = false;
+  let pagesRead = false;
+
   function ensureButton() {
-    if (button) return;
+    if (!pagesRead) { pagesRead = true; readPagination(); }
+    if (button || buttonHidden) return;
+    buttonBox = document.createElement('div');
+    buttonBox.style.cssText = 'position:fixed;left:16px;bottom:16px;z-index:999999;display:flex;' +
+      'border-radius:8px;border:1px solid #546e7a;background:#263238;box-shadow:0 2px 10px rgba(0,0,0,.5);' +
+      'font:12px/1.3 system-ui,-apple-system,"Segoe UI",sans-serif;font-weight:700';
+    const base = 'background:none;border:0;color:#eceff1;font:inherit;cursor:pointer;';
     button = document.createElement('button');
     button.type = 'button';
-    button.style.cssText = 'position:fixed;left:16px;bottom:16px;z-index:999999;' +
-      'padding:7px 14px;font:12px/1.3 system-ui,-apple-system,"Segoe UI",sans-serif;font-weight:700;' +
-      'border-radius:8px;border:1px solid #546e7a;background:#263238;color:#eceff1;' +
-      'box-shadow:0 2px 10px rgba(0,0,0,.5)';
-    button.addEventListener('click', () => { if (state.error) start(); else toggleSort(); });
-    readPagination();
-    document.body.append(button);
+    button.style.cssText = base + 'padding:7px 6px 7px 14px';
+    button.addEventListener('click', onSortClick);
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.textContent = '×';
+    close.title = 'Hide this button (the Jiten column header sorts too). Bring it back from the Tampermonkey menu.';
+    close.style.cssText = base + 'padding:7px 10px 7px 6px;opacity:.6;font-size:14px;line-height:1';
+    close.addEventListener('click', () => { setVal('hideButton', true); removeButton(); });
+    buttonBox.append(button, close);
+    document.body.append(buttonBox);
     updateButton();
+  }
+
+  function removeButton() {
+    buttonHidden = true;
+    buttonBox?.remove();
+    buttonBox = null;
+    button = null;
   }
 
   function addHeader(table, afterIndex) {
@@ -391,9 +608,7 @@
     if (!ref) return;
     const h = document.createElement(ref.tagName);
     h.className = 'tc_jiten';
-    h.title = 'Jiten difficulty (click to sort)';
-    h.style.cssText = 'white-space:nowrap;cursor:pointer;padding-left:8px;padding-right:8px';
-    h.addEventListener('click', toggleSort);
+    h.style.cssText = 'white-space:nowrap;padding-left:8px;padding-right:8px';
     ref.after(h);
     headerCells.set(table, h);
     updateButton();
@@ -469,6 +684,7 @@
         holder.style.marginLeft = '6px';
         a.after(holder);
       }
+      pickColors(holder.parentElement); // once per page, from where the first value goes
       const item = {
         vid: new URL(a.href).pathname.slice(1).toLowerCase(), title: a.title || a.textContent,
         holder, tr: listRow ? tr : null, inline: !listRow,
@@ -533,6 +749,12 @@
     await setVal('apiKey', next.trim());
     alert(next.trim() ? 'Key saved. Reload the page to check requests.' : 'Key removed.');
   });
+  menu('Show or hide the floating Jiten button', async () => {
+    const hide = !buttonHidden;
+    await setVal('hideButton', hide);
+    if (hide) removeButton();
+    else { buttonHidden = false; if (items.length) ensureButton(); }
+  });
   menu('Refresh Jiten data now', async () => {
     for (const k of await listVals()) if (k === 'catalogue' || k.startsWith('req:') || k.startsWith('jvl:')) await delVal(k);
     location.reload();
@@ -543,10 +765,13 @@
     for (const k of await listVals()) if (k.startsWith('jvl:')) await delVal(k);
   })();
 
-  if (scan()) start();
-  let debounce = null;
-  new MutationObserver(() => {
-    clearTimeout(debounce);
-    debounce = setTimeout(() => { if (scan() && !started) start(); }, 200);
-  }).observe(document.body, { childList: true, subtree: true });
+  (async () => {
+    buttonHidden = !!(await getVal('hideButton'));
+    if (scan()) start();
+    let debounce = null;
+    new MutationObserver(() => {
+      clearTimeout(debounce);
+      debounce = setTimeout(() => { if (scan() && !started) start(); }, 200);
+    }).observe(document.body, { childList: true, subtree: true });
+  })();
 })();
