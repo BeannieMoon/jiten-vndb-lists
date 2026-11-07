@@ -55,7 +55,8 @@ so you can see at a glance which visual novels are easy or hard to read in Japan
   when you open that page (one request covers four pages). A **+ N not on Jiten ›** tab takes you back to VNDB's
   own order with everything.
 - A small spinner and a counter (like `2/6`) next to the *Jiten* header show while anything loads.
-  Hover over them for details.
+  Hover over them for details. On pages without the column (producer pages), a small note in the corner shows the
+  first download of the Jiten data (about 10 seconds, once a day).
 - There's also an optional floating button in the bottom-left corner that sorts and shows progress.
   It's off by default. Turn it on in **Settings**; its **×** turns it off again.
 - **Fits every VNDB skin.** The colors adjust to your skin: light text on dark skins, dark text on light skins,

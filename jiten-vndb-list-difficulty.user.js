@@ -7,7 +7,7 @@
 // @supportURL   https://github.com/BeannieMoon/jiten-vndb-lists/issues
 // @downloadURL  https://raw.githubusercontent.com/BeannieMoon/jiten-vndb-lists/main/jiten-vndb-list-difficulty.user.js
 // @updateURL    https://raw.githubusercontent.com/BeannieMoon/jiten-vndb-lists/main/jiten-vndb-list-difficulty.user.js
-// @version      3.5.2
+// @version      3.5.3
 // @description  Adds a Jiten difficulty column to VNDB lists (your ulist/wishlist/votes, the /v browse list, tag pages, staff/VA pages) and shows it on producer pages, marks what isn't on Jiten (NA), and sorts by difficulty.
 // @match        https://vndb.org/v
 // @match        https://vndb.org/v?*
@@ -32,7 +32,7 @@
 
   const JITEN = 'https://jiten.moe';
   const JITEN_API = 'https://api.jiten.moe/api';
-  const CLIENT_NAME = 'Jiten VNDB List Difficulty/3.5.2';
+  const CLIENT_NAME = 'Jiten VNDB List Difficulty/3.5.3';
   // Measured: 4-5 parallel requests is the fastest; more makes Jiten slower, and bursts get 429s.
   const CONCURRENCY = 4;
   const CATALOGUE_TTL = 24 * 60 * 60 * 1000;
@@ -927,7 +927,8 @@
 
   function busyText() {
     if (state.error) return null;
-    if (!state.complete) return `Loading Jiten data (${state.catDone}/${state.catTotal || '?'})…`
+    if (!state.complete && state.waiting) return 'Waiting for another VNDB tab that is downloading the Jiten data…';
+    if (!state.complete) return `Downloading the list of Jiten decks, once a day (${state.catDone}/${state.catTotal || '?'})…`
       + (pendingSort ? ' The list sorts as soon as it\'s in.' : '');
     if (pages.loading) return pages.progress;
     if (state.reqTotal > state.reqDone) return `Checking which titles are already requested on Jiten (${state.reqDone}/${state.reqTotal})…`;
@@ -1000,6 +1001,7 @@
 
   function updateButton() {
     for (const h of headerCells.values()) renderHeader(h);
+    updateStatus();
     if (!button) return;
     let text;
     const busy = busyText();
@@ -1015,6 +1017,33 @@
     }
     button.textContent = text;
     button.style.cursor = state.error || sortableTables.size ? 'pointer' : 'default';
+  }
+
+  // Pages without a Jiten column (producer pages) have no header spinner, so while the Jiten
+  // data downloads (about 10 seconds, once a day) or fails, a small note in the corner says so.
+  let statusBox = null;
+  function updateStatus() {
+    const busy = started && !state.complete ? busyText() : null;
+    const wanted = (busy || state.error) && !headerCells.size && items.length && !button;
+    if (!wanted) {
+      statusBox?.remove();
+      statusBox = null;
+      return;
+    }
+    if (!statusBox) {
+      statusBox = document.createElement('div');
+      statusBox.className = 'jvl-status';
+      statusBox.style.cssText = 'position:fixed;left:16px;bottom:16px;z-index:999999;display:flex;gap:8px;align-items:center;'
+        + 'max-width:calc(100vw - 32px);box-sizing:border-box;padding:7px 12px;border-radius:8px;border:1px solid #546e7a;'
+        + 'background:#263238;color:#eceff1;box-shadow:0 2px 10px rgba(0,0,0,.5);font:12px/1.3 system-ui,-apple-system,"Segoe UI",sans-serif';
+      statusBox.append(makeSpinner(), document.createElement('span'));
+      statusBox.firstChild.style.marginLeft = '0';
+      statusBox.addEventListener('click', () => { if (state.error) start(); });
+      document.body.append(statusBox);
+    }
+    statusBox.firstChild.style.display = state.error ? 'none' : '';
+    statusBox.lastChild.textContent = state.error ? `⚠ Jiten: ${state.error.message} — click to retry` : `Jiten: ${busy}`;
+    statusBox.style.cursor = state.error ? 'pointer' : 'default';
   }
 
   // The floating button (bottom left) is off by default: the header does the same job.
@@ -1143,6 +1172,7 @@
       const table = a.closest('table');
       const holder = document.createElement('span');
       holder.textContent = '…';
+      holder.title = 'Waiting for the Jiten data';
       holder.style.cssText = 'opacity:0.4';
       // One-row-per-VN lists (ulist/wishlist/votes, browse, staff pages) get their own Jiten
       // column and can be sorted. Producer pages put the VN as a header row above its release
@@ -1184,7 +1214,12 @@
     let cached = await getVal('catalogue');
     // Opening several VNDB tabs at once shouldn't mean several downloads: one tab loads the
     // catalogue, the others wait for it.
-    if (!cached?.map && !(await takeCatalogueLock())) cached = await waitForCatalogue();
+    if (!cached?.map && !(await takeCatalogueLock())) {
+      state.waiting = true;
+      updateButton();
+      cached = await waitForCatalogue();
+      state.waiting = false;
+    }
     if (cached?.map) {
       // Show the cached data right away; if it's over a day old, refresh it quietly behind it.
       setCatalogue(cached.map);
@@ -1209,7 +1244,7 @@
     } catch (e) {
       state.error = e;
     }
-    await setVal('catalogueLock', 0);
+    await releaseCatalogueLock();
     updateButton();
     for (const item of items) if (!item.done) settle(item);
     runPendingSort();
@@ -1222,22 +1257,34 @@
     else updateButton();
   }
 
-  const LOCK_TIME = 3 * 60 * 1000;
+  // The downloading tab renews its claim every 2 seconds. If it's closed or navigates away
+  // midway, the claim goes stale and a waiting tab takes over within a few seconds.
+  const LOCK_STALE = 7000;
+  let lockBeat = null;
   async function takeCatalogueLock() {
     const t = (await getVal('catalogueLock')) || 0;
-    if (Date.now() - t < LOCK_TIME) return false;
+    if (Date.now() - t < LOCK_STALE) return false;
     await setVal('catalogueLock', Date.now());
+    clearInterval(lockBeat);
+    lockBeat = setInterval(() => setVal('catalogueLock', Date.now()), 2000);
     return true;
   }
 
+  async function releaseCatalogueLock() {
+    if (!lockBeat) return;
+    clearInterval(lockBeat);
+    lockBeat = null;
+    await setVal('catalogueLock', 0);
+  }
+  addEventListener('pagehide', () => { releaseCatalogueLock(); });
+
   async function waitForCatalogue() {
-    for (const end = Date.now() + LOCK_TIME; Date.now() < end;) {
-      await sleep(2000);
+    for (;;) {
+      await sleep(1000);
       const c = await getVal('catalogue');
       if (c?.map) return c;
+      if (await takeCatalogueLock()) return null; // the other tab stopped: load it here
     }
-    await setVal('catalogueLock', Date.now()); // the other tab gave up: load it here
-    return null;
   }
 
   async function refreshInBackground() {
@@ -1250,7 +1297,7 @@
     } catch {
       return; // keep the old data
     } finally {
-      await setVal('catalogueLock', 0);
+      await releaseCatalogueLock();
     }
     await setVal('catalogue', { ts: Date.now(), map });
     setCatalogue(map);
