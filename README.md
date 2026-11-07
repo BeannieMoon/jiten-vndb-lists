@@ -12,7 +12,7 @@ so you can see at a glance which visual novels are easy or hard to read in Japan
 
 ## What it does
 
-![Browse list sorted by Jiten difficulty](screenshots/browse-sorted.jpg)
+![A VNDB user list sorted by Jiten difficulty](screenshots/user-list.png)
 
 - Adds a **Jiten** column to VNDB tables that have one row per VN:
   - your list (`/u…/ulist`), wishlist and votes;
@@ -30,9 +30,13 @@ so you can see at a glance which visual novels are easy or hard to read in Japan
 - On producer pages (`/p…`), VNDB lists each VN with its releases underneath, so the value goes next to the VN title
   and the page isn't reordered.
 
+**Browse list** (`/v`), hardest first:
+
+![Browse list sorted by Jiten difficulty](screenshots/browse-sorted.png)
+
 | Staff / VA page | Producer page |
 |---|---|
-| ![Staff page](screenshots/staff-page.jpg) | ![Producer page](screenshots/producer-page.jpg) |
+| ![Staff page](screenshots/staff-page.png) | ![Producer page](screenshots/producer-page.png) |
 
 ## Install
 
