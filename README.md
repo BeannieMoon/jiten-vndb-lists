@@ -15,7 +15,8 @@ so you can see at a glance which visual novels are easy or hard to read in Japan
 >
 > - **Use version 3.4.1 or newer.** 3.4.0 loaded big lists far too fast. Update in Tampermonkey.
 > - **Don't reload the page and re-sort a big list over and over.** Sorting up and down on the same page is
->   free, but every reload starts over.
+>   free. A reload within 10 minutes is free too, as long as you stayed on the page (see *How it works*);
+>   anything else starts over.
 > - **Don't sort lots of lists in a row**, in one tab or many, especially while you're also browsing VNDB.
 > - **If you see the 429 page, stop.** Don't keep refreshing; wait 10–15 minutes. (When the script itself
 >   gets a 429, it also pauses for 10 minutes on its own.)
@@ -139,7 +140,10 @@ so the script stays well below what a person clicking around does:
   to the arrows in case you change your mind. Closing the pop-up (Escape or a click outside) does nothing at all.
   Tick *Remember my choice* and it won't ask again; you can change that any time in **Settings**
   (*Ask first*, *Load without asking* or *Never*).
-- Loaded at most once per visit.
+- Loaded at most once per visit. A list loaded whole is also kept in your browser for 10 minutes, so reloading
+  the page (or switching to the list's other pages, or to 200 per page) and sorting again needs no requests.
+  It's only kept while you stay on the list: changing a vote, label, date or note, switching to another tab or
+  window, or opening a page such as a VN's own page throws it away, so it never shows an old label or vote.
 - At most one VNDB page every 3 seconds, shared by all your VNDB tabs, 200 rows per request.
   A 1,000-title list is 5 requests; a long list is one request per four pages you actually open.
 - VNDB's API (meant for scripts) is used at most once every 1.5 seconds, shared by all your VNDB tabs.

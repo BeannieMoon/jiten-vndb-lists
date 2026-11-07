@@ -7,7 +7,7 @@
 // @supportURL   https://github.com/BeannieMoon/jiten-vndb-lists/issues
 // @downloadURL  https://raw.githubusercontent.com/BeannieMoon/jiten-vndb-lists/main/jiten-vndb-list-difficulty.user.js
 // @updateURL    https://raw.githubusercontent.com/BeannieMoon/jiten-vndb-lists/main/jiten-vndb-list-difficulty.user.js
-// @version      3.6.2
+// @version      3.7.0
 // @description  Adds a Jiten difficulty column to VNDB lists (your ulist/wishlist/votes, the /v browse list, tag pages, staff/VA pages) and shows it on producer pages, marks what isn't on Jiten (NA), and sorts by difficulty.
 // @match        https://vndb.org/v
 // @match        https://vndb.org/v?*
@@ -32,7 +32,7 @@
 
   const JITEN = 'https://jiten.moe';
   const JITEN_API = 'https://api.jiten.moe/api';
-  const CLIENT_NAME = 'Jiten VNDB List Difficulty/3.6.2';
+  const CLIENT_NAME = 'Jiten VNDB List Difficulty/3.7.0';
   // Measured: 4-5 parallel requests is the fastest; more makes Jiten slower, and bursts get 429s.
   const CONCURRENCY = 4;
   const CATALOGUE_TTL = 24 * 60 * 60 * 1000;
@@ -365,7 +365,7 @@
   // A multi-page list, once loaded and sorted, is shown in pages of the size VNDB uses, with
   // tabs that look like VNDB's but switch pages here instead of reloading. For long lists only
   // the sorted ids are kept (view.lazy), and a page's rows are loaded when that page is shown.
-  const view = { rows: null, lazy: null, page: 1, perPage: 50, restHref: null, restLabel: '' };
+  const view = { rows: null, lazy: null, page: 1, perPage: 50, restHref: null, restLabel: '', tabsTitle: '' };
   const diffOfId = (v) => state.catalogue[v]?.[1] ?? -1;
 
   function sortTable(table, dir) {
@@ -421,6 +421,7 @@
         nav.after(mine);
       }
       mine.replaceChildren(...tabItems(pageCount, table));
+      mine.title = view.tabsTitle || '';
     }
   }
 
@@ -520,6 +521,9 @@
   const VNDB_GAP = 3000;
   const API_GAP = 1500;
   const VNDB_COOLDOWN = 10 * 60 * 1000;
+  // A list loaded whole is kept for 10 minutes while you stay on it (see forgetKept), so sorting
+  // it again after a reload needs no requests.
+  const LIST_TTL = 10 * 60 * 1000;
   class SlowDown extends Error {}
   const clock = (t) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   const slowDownError = (until) => new SlowDown(`VNDB asked to slow down, so nothing more is loaded from it until ${clock(until)}`);
@@ -560,6 +564,8 @@
 
   // One page of a list: its VN rows, the number of pages, and the data VNDB needs to build
   // the vote, label and date editors in those rows (page JSON keyed by "widget<N>" ids).
+  // "raw" is the same as plain data, so a loaded list can be kept for a while (saveList).
+  const isVnRow = (tr) => tr.querySelector('td.tc_title a[href^="/v"], td.tc1 a[href^="/v"]');
   async function fetchPage(url, p) {
     const u = new URL(url);
     u.searchParams.set('p', p);
@@ -571,25 +577,184 @@
     const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
     let widgetData = {};
     try { widgetData = JSON.parse(doc.getElementById('pagevars')?.textContent || '{}').widget || {}; } catch { /* none */ }
-    const byId = {};
-    for (const [name, entries] of Object.entries(widgetData)) for (const [id, data] of entries) byId[id] = { name, data };
-    const rows = [...doc.querySelectorAll('table.stripe tr')]
-      .filter((tr) => tr.querySelector('td.tc_title a[href^="/v"], td.tc1 a[href^="/v"]'))
-      .map((tr) => document.importNode(tr, true));
-    const widgets = [];
-    const seq = ++fetchSeq;
-    for (const tr of rows) {
-      for (const el of tr.querySelectorAll('[id^="widget"]')) {
-        const w = byId[el.id.slice(6)];
-        el.id = `jvl-${seq}-${el.id}`; // the same ids repeat on every page
-        if (w) widgets.push({ el, ...w });
-      }
-    }
     let total = 1;
     for (const a of doc.querySelectorAll('.browsetabs a[href]')) {
       total = Math.max(total, parseInt(new URL(a.getAttribute('href'), u).searchParams.get('p'), 10) || 1);
     }
-    return { rows, widgets, total };
+    const raw = rawRows([...doc.querySelectorAll('table.stripe tr')].filter(isVnRow), widgetData, total);
+    return { ...rowsFrom(raw), raw };
+  }
+
+  // Rows as plain data: their HTML and links, and the data of the editors in them.
+  function rawRows(trs, widgetData, total) {
+    const byId = {};
+    for (const [name, entries] of Object.entries(widgetData || {})) for (const [id, data] of entries) byId['widget' + id] = { name, data };
+    const widgets = {};
+    for (const tr of trs) for (const el of tr.querySelectorAll('[id^="widget"]')) if (byId[el.id]) widgets[el.id] = byId[el.id];
+    return { html: trs.map((tr) => tr.outerHTML), hrefs: trs.map(rowHref), widgets, total };
+  }
+
+  // Rows of a page (just loaded, or kept from earlier) ready for this page, with their editors' data.
+  function rowsFrom(raw) {
+    const t = document.createElement('template');
+    t.innerHTML = `<table><tbody>${raw.html.join('')}</tbody></table>`;
+    const rows = [...t.content.querySelectorAll('tbody > tr')].map((tr) => document.importNode(tr, true));
+    const widgets = [];
+    const seq = ++fetchSeq;
+    for (const tr of rows) {
+      for (const el of tr.querySelectorAll('[id^="widget"]')) {
+        const w = raw.widgets[el.id];
+        el.id = `jvl-${seq}-${el.id}`; // the same ids repeat on every page
+        if (w) widgets.push({ el, ...w });
+      }
+    }
+    return { rows, widgets, total: raw.total };
+  }
+
+  // The rows on screen as plain data, without this script's cells.
+  function rawOwn(rows) {
+    const clean = rows.map((tr) => {
+      const c = tr.cloneNode(true);
+      for (const e of c.querySelectorAll('.tc_jiten')) e.remove();
+      for (const e of [c, ...c.querySelectorAll('*')]) {
+        for (const a of [...e.attributes]) if (a.name.startsWith('data-jvl')) e.removeAttribute(a.name);
+      }
+      return c;
+    });
+    let widgetData = {};
+    try { widgetData = JSON.parse(JSON.stringify(pageWin.pageVars?.widget || {})); } catch { /* none */ }
+    return rawRows(clean, widgetData, pages.total);
+  }
+
+  // Which list this is: its address at 200 rows per page, without the page number.
+  function listKey() {
+    const u = at200(pages.template);
+    u.searchParams.delete('p');
+    return u.pathname + u.search;
+  }
+
+  // The rows of this page in VNDB's order, noted before the first sort.
+  let vndbOrder = null;
+  const inVndbOrder = (rows) => {
+    const at = new Map((vndbOrder || []).map((r, i) => [r, i]));
+    return [...rows].sort((a, b) => (at.get(a) ?? 1e9) - (at.get(b) ?? 1e9));
+  };
+
+  // The kept list lives in VNDB's own local storage, not in the script's storage: the script's
+  // storage is handed to every VNDB page as it opens, and 1-3 MB of rows would slow them all down.
+  // The small "info" entry says which list it is and when it was loaded, so nothing big is read
+  // unless it's needed. A list too big for the space (or storage switched off) just isn't kept.
+  const KEPT_INFO = 'jvl-keptListInfo';
+  const KEPT_DATA = 'jvl-keptList';
+  const KEPT_MAX = 2500000; // characters; leaves VNDB plenty of room in its storage
+  function keptInfo() {
+    try { return JSON.parse(localStorage.getItem(KEPT_INFO) || 'null'); } catch { return null; }
+  }
+  function dropKept() {
+    try {
+      localStorage.removeItem(KEPT_DATA);
+      localStorage.removeItem(KEPT_INFO);
+    } catch { /* storage switched off */ }
+  }
+
+  // A copy of this list loaded in the last 10 minutes, if the page on screen (fresh from VNDB)
+  // still matches it. Otherwise the list has changed since, and it's loaded again.
+  function savedListFor() {
+    const info = keptInfo();
+    if (!info || info.key !== listKey() || !(Date.now() - info.ts < LIST_TTL)) return null;
+    if (!info.away || Object.keys(info.away).length) { // a tab went somewhere else
+      dropKept();
+      return null;
+    }
+    let s;
+    try { s = JSON.parse(localStorage.getItem(KEPT_DATA) || 'null'); } catch { return null; }
+    if (!s?.pages || s.ts !== info.ts || s.key !== info.key) return null;
+    const hrefs = [];
+    for (let p = 1; p <= s.total; p++) {
+      if (!s.pages[p]) return null;
+      hrefs.push(...s.pages[p].hrefs);
+    }
+    const per = readPerPage();
+    if (Math.ceil(hrefs.length / per) !== pages.total) return null;
+    const start = (pages.current - 1) * per;
+    if (!vndbOrder?.length || vndbOrder.some((r, i) => rowHref(r) !== hrefs[start + i])) return null;
+    return s;
+  }
+
+  // Returns whether the list was kept.
+  function saveList(list) {
+    try {
+      dropKept(); // only one list is kept
+      if (invalidated) return false; // something may have changed since this page was loaded
+      const data = JSON.stringify(list);
+      if (data.length > KEPT_MAX) return false;
+      localStorage.setItem(KEPT_DATA, data);
+      localStorage.setItem(KEPT_INFO, JSON.stringify({ key: list.key, ts: list.ts, away: {} }));
+      return true;
+    } catch {
+      dropKept(); // storage full or switched off: the list just isn't kept
+      return false;
+    }
+  }
+
+  // The kept copy is only trusted while you stay on the pages this script runs on, where it sees
+  // every change. It's thrown away when:
+  // - you change a vote, label, date or note on one of them (in any list: the kept one may have the
+  //   same title), or type or tick anything there;
+  // - the page loses focus (another tab, window or program, the address bar): you may change
+  //   something where this script can't see it, such as a VN's own page;
+  // - a page opens that wasn't opened straight from one of these pages in the same tab (by a reload
+  //   or one of its links), or comes back from the browser's memory after Back: you were elsewhere;
+  // - a tab has left one of these pages, and no page of this script has opened in it since.
+  // A page that sees any of this before its list is loaded doesn't keep that list.
+  let invalidated = 0;
+  function forgetKept() {
+    invalidated++;
+    dropKept();
+  }
+  function onEdit(e) {
+    const t = e.target;
+    if (typeof t?.closest !== 'function' || t.closest('.jvl-dialog')) return; // this script's own windows
+    if (e.type === 'click' && !t.closest('[id^="widget"], [id^="jvl-"]')) return;
+    forgetKept();
+  }
+  for (const type of ['change', 'input', 'click']) document.addEventListener(type, onEdit, true);
+  let unloading = false; // a reload isn't leaving
+  addEventListener('blur', (e) => { if (!e.target?.nodeType && !unloading) forgetKept(); }); // the window's own blur
+  addEventListener('pageshow', (e) => {
+    if (!e.persisted) return;
+    unloading = false;
+    forgetKept();
+  });
+
+  // Each tab notes when its last page of this script closed. A page opened straight from it
+  // (a reload or a link) started loading before that; one opened after a visit elsewhere, later.
+  const TAB_ID = 'jvl-tab';
+  const LEFT_AT = 'jvl-leftAt';
+  let tabId = '';
+  function updateKeptInfo(change) {
+    const info = keptInfo();
+    if (!info) return;
+    change(info);
+    localStorage.setItem(KEPT_INFO, JSON.stringify(info));
+  }
+  addEventListener('pagehide', () => {
+    unloading = true;
+    try {
+      sessionStorage.setItem(LEFT_AT, String(Date.now()));
+      updateKeptInfo((info) => { (info.away ||= {})[tabId] = Date.now(); });
+    } catch { /* storage switched off */ }
+  });
+  try {
+    const left = +sessionStorage.getItem(LEFT_AT);
+    const started = performance.timeOrigin || performance.timing?.navigationStart;
+    const straight = left > 0 && started > 0 && started <= left + 1000;
+    tabId = (straight && sessionStorage.getItem(TAB_ID)) || Math.random().toString(36).slice(2);
+    sessionStorage.setItem(TAB_ID, tabId);
+    if (straight) updateKeptInfo((info) => { if (info.away) delete info.away[tabId]; });
+    else dropKept();
+  } catch {
+    dropKept();
   }
 
   async function vndbApi(body) {
@@ -706,18 +871,24 @@
 
   // A whole list: all or nothing. If any request fails, the table stays as VNDB sent it
   // (with VNDB's own tabs) and only this page is sorted.
-  async function loadAllPages(table) {
+  async function loadAllPages(table, saved) {
     const c = collector(table);
     const url = at200(pages.template);
     const maxRequests = Math.ceil(MAX_LIST_TITLES / (tableOpts() != null ? 200 : readPerPage()));
     // Already showing 200 rows per page: the page on screen is one of the pages to load, so
     // it's used as it is instead of being loaded again.
     const onScreen = shownAt200() ? pages.current : 0;
-    let total = onScreen ? pages.total : 1;
+    let total = saved ? saved.total : onScreen ? pages.total : 1;
+    const raws = {};
     let n = 0;
     for (let p = 1; p <= total; p++) {
       if (p === onScreen) {
+        if (!saved) raws[p] = rawOwn(inVndbOrder(c.unused()));
         c.take({ rows: c.unused(), widgets: [] });
+        continue;
+      }
+      if (saved) { // kept from a load a few minutes ago: no request
+        c.take(rowsFrom(saved.pages[p]));
         continue;
       }
       const of = onScreen ? total - 1 : p > 1 ? total : '?';
@@ -725,6 +896,7 @@
       pages.progress = `Loading the whole list from VNDB (request ${n} of ${of}, one every 3 seconds)…`;
       updateButton();
       const res = await fetchPage(url, p);
+      raws[p] = res.raw;
       if (p === 1) total = res.total;
       if (total > maxRequests) throw new Error('This list is too long to load whole');
       c.take(res);
@@ -733,6 +905,15 @@
     adoptRows(table, rows, c.widgets);
     view.perPage = readPerPage();
     view.rows = rows.filter((r) => r.dataset.jvlRow);
+    if (saved) {
+      view.tabsTitle = `Loaded from VNDB at ${clock(saved.ts)} and kept since then, so this sort needed no requests.`;
+      return;
+    }
+    const ts = Date.now();
+    view.tabsTitle = `Loaded from VNDB at ${clock(ts)}.`;
+    if (saveList({ key: listKey(), ts, total, pages: raws })) {
+      view.tabsTitle += ` If you reload this page within 10 minutes without leaving it, sorting again needs no requests.`;
+    }
   }
 
   const unfilteredBrowse = (u) => u.pathname === '/v' && !['f', 'q', 'ch'].some((k) => u.searchParams.get(k));
@@ -876,16 +1057,19 @@
       // At 200 rows per page, the page on screen doesn't need loading again.
       const requests = Math.ceil((pages.total * readPerPage()) / (tableOpts() != null ? 200 : readPerPage()))
         - (shownAt200() ? 1 : 0);
-      return askToLoad(`Sort the whole list (${pages.total} pages)?`,
-        `This loads the list from VNDB in ${requests} request${requests === 1 ? '.' : 's'}`
-        + (requests > 1 ? `, one every 3 seconds (about ${(requests - 1) * 3 + 1} seconds).` : ''),
+      return askToLoad(`Sort all ${pages.total} pages?`,
+        'To sort the whole list, the script first loads it from VNDB. This takes '
+        + (requests > 1 ? `about ${(requests - 1) * 3 + 1} seconds.` : 'a moment.'),
+        `${requests} page load${requests === 1 ? '' : 's, one every 3 seconds'}.`,
         'Sort the whole list');
     }
     const calls = unfilteredBrowse(new URL(location.href)) ? 0
       : Math.ceil(Object.values(state.catalogue).filter((c) => c[1] != null && c[1] >= 0).length / 100);
-    return askToLoad('Sort this long list by its titles on Jiten?',
-      (calls ? `First, VNDB's API is asked which titles here are on Jiten (${calls} small request${calls === 1 ? '' : 's'}, about ${Math.ceil((calls - 1) * 1.5) + 1} seconds). Then each`
-        : 'Each') + ' page is loaded from VNDB only when you open it (one request covers four pages).',
+    return askToLoad('Sort this long list by difficulty?',
+      'It\'s too long to load whole, so only its titles that are on Jiten are sorted. A tab at the end goes back '
+        + 'to the full list. Pages load from VNDB as you open them.',
+      (calls ? `First ${calls} small request${calls === 1 ? '' : 's'} (about ${Math.ceil((calls - 1) * 1.5) + 1} seconds), then one`
+        : 'One') + ' page load per four pages you open.',
       'Sort by Jiten titles');
   }
 
@@ -893,6 +1077,7 @@
   let asking = false;
   async function applySort(dir, again = false) {
     if (!sortableTables.size || pages.loading || asking) return;
+    if (!vndbOrder) vndbOrder = [...([...sortableTables][0].tBodies[0] || [...sortableTables][0]).rows].filter((r) => r.dataset.jvlRow);
     if (!state.complete) { // sort as soon as the Jiten data is in
       pendingSort = dir;
       updateButton();
@@ -903,14 +1088,18 @@
     if ((whole || canLoadJitenOnly()) && (!pages.declined || again)) {
       asking = true;
       let ok;
-      try { ok = await okToLoad(whole, again); } finally { asking = false; }
+      let saved = null;
+      try {
+        saved = whole ? await savedListFor() : null; // loaded a few minutes ago: no requests, no question
+        ok = saved ? true : await okToLoad(whole, again);
+      } finally { asking = false; }
       if (ok === null) return; // closed without choosing: nothing happens
       if (ok) {
         pages.declined = false;
         pages.loading = true;
         updateButton();
         try {
-          if (whole) await loadAllPages(table); else await loadJitenTitles(table);
+          if (whole) await loadAllPages(table, saved); else await loadJitenTitles(table);
         } catch (e) {
           console.warn('[Jiten VNDB] could not load the whole list:', e);
           pages.note = `${e.message}. Sorted this page only.`;
@@ -1498,7 +1687,8 @@
     return { box, close };
   }
 
-  function askToLoad(title, text, yesLabel) {
+  // detail: the requests it takes, in the small grey line.
+  function askToLoad(title, text, detail, yesLabel) {
     return new Promise((resolve) => {
       const remember = field('checkbox');
       const d = openDialog(title, (yes) => resolve(yes == null ? null : !!yes)); // closed: no answer
@@ -1510,7 +1700,7 @@
       d.box.append(
         el('h2', '', title),
         el('p', '', text),
-        el('p', 'dim', 'The script stops at once if VNDB asks it to slow down.'),
+        el('p', 'dim', `${detail} It stops at once if VNDB asks it to slow down.`),
         el('label', 'remember', remember, 'Remember my choice (you can change it in Settings)'),
         el('div', 'buttons', dialogButton('Just this page', '', () => answer(false)), yes),
       );
@@ -1600,6 +1790,7 @@
       section('Jiten data', el('div', '', ageText),
         el('div', 'spaced', dialogButton('Download again now', '', async () => {
           for (const k of await listVals()) if (k === 'catalogue' || k.startsWith('req:')) await delVal(k);
+          dropKept();
           location.reload();
         })), note('Reloads this page.')),
       el('div', 'foot',
@@ -1616,6 +1807,11 @@
     // 3.4.2 had an on/off switch for loading other pages; 3.5 has three choices.
     if ((await getVal('pageOnly')) === true && !(await getVal('loadMode'))) await setVal('loadMode', 'never');
     await delVal('pageOnly');
+    // A kept list is only good for 10 minutes; don't leave it in VNDB's storage after that.
+    try {
+      const kept = keptInfo();
+      if (kept ? !(Date.now() - kept.ts < LIST_TTL) : localStorage.getItem(KEPT_DATA) != null) dropKept();
+    } catch { /* storage switched off */ }
   })();
 
   let running = false;
