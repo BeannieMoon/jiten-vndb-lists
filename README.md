@@ -105,7 +105,8 @@ On any VNDB page, open the Tampermonkey menu and choose **Settings**:
 - **Show the Jiten column on**: turn the script on or off for each kind of page (your lists, browse,
   tag pages, staff pages, producer pages). Where it's off, the script does nothing at all.
 - **Sorting lists with several pages**: *Ask first* (the default), *Load without asking*, or *Never*
-  (only sort the page you're on).
+  (only sort the page you're on). With *Never*, the **(whole list)** link next to the arrows still lets you
+  load one list when you want to; it always asks first.
 - **Floating button**: show or hide the sort button in the bottom-left corner.
 - **Jiten API key** (optional, see below).
 - **Jiten data**: when it was last downloaded, and a button to download it again now.
@@ -130,8 +131,10 @@ It only talks to `api.jiten.moe`, and to `vndb.org` / `api.vndb.org` when a sort
 so the script stays well below what a person clicking around does:
 
 - Nothing extra is loaded unless you sort a multi-page list **and say yes** to the pop-up, which tells you how many
-  requests it will make. *Just this page* sorts only the page you're on. Tick *Remember my choice* and it won't ask
-  again; you can change that any time in **Settings** (*Ask first*, *Load without asking* or *Never*).
+  requests it will make. *Just this page* sorts only the page you're on, and a **(whole list)** link appears next
+  to the arrows in case you change your mind. Closing the pop-up (Escape or a click outside) does nothing at all.
+  Tick *Remember my choice* and it won't ask again; you can change that any time in **Settings**
+  (*Ask first*, *Load without asking* or *Never*).
 - Loaded at most once per visit.
 - At most one VNDB page every 3 seconds, shared by all your VNDB tabs, 200 rows per request.
   A 1,000-title list is 5 requests; a long list is one request per four pages you actually open.
@@ -142,7 +145,7 @@ so the script stays well below what a person clicking around does:
 
 On the Jiten side, the catalogue is 2 requests once a day, downloaded by one tab even if you open several,
 with at least 120 ms between requests (Jiten Everywhere's pace). A *429* from Jiten is retried once; a second one
-stops Jiten requests for a minute. With an API key, the *already requested* check runs only for titles that come on
+stops Jiten requests for a minute, in all your VNDB tabs. With an API key, the *already requested* check runs only for titles that come on
 screen, each answer is kept for a week, and a rejected key stops the checks.
 
 ## Credits

@@ -7,7 +7,7 @@
 // @supportURL   https://github.com/BeannieMoon/jiten-vndb-lists/issues
 // @downloadURL  https://raw.githubusercontent.com/BeannieMoon/jiten-vndb-lists/main/jiten-vndb-list-difficulty.user.js
 // @updateURL    https://raw.githubusercontent.com/BeannieMoon/jiten-vndb-lists/main/jiten-vndb-list-difficulty.user.js
-// @version      3.6.0
+// @version      3.6.1
 // @description  Adds a Jiten difficulty column to VNDB lists (your ulist/wishlist/votes, the /v browse list, tag pages, staff/VA pages) and shows it on producer pages, marks what isn't on Jiten (NA), and sorts by difficulty.
 // @match        https://vndb.org/v
 // @match        https://vndb.org/v?*
@@ -32,7 +32,7 @@
 
   const JITEN = 'https://jiten.moe';
   const JITEN_API = 'https://api.jiten.moe/api';
-  const CLIENT_NAME = 'Jiten VNDB List Difficulty/3.6.0';
+  const CLIENT_NAME = 'Jiten VNDB List Difficulty/3.6.1';
   // Measured: 4-5 parallel requests is the fastest; more makes Jiten slower, and bursts get 429s.
   const CONCURRENCY = 4;
   const CATALOGUE_TTL = 24 * 60 * 60 * 1000;
@@ -143,8 +143,8 @@
   }
 
   // Same pace as Jiten Everywhere: requests start at least 120 ms apart, and a 429 is retried
-  // once, after Retry-After if that's 10 s or less. A second 429 stops Jiten requests in this tab
-  // for a minute (or as long as Jiten asks).
+  // once, after Retry-After if that's 10 s or less. A second 429 stops Jiten requests in every
+  // VNDB tab for a minute (or as long as Jiten asks), so other tabs don't try again meanwhile.
   const JITEN_GAP = 120;
   let nextJiten = 0;
   let jitenStoppedUntil = 0;
@@ -154,7 +154,8 @@
       await acquire();
       let r;
       try {
-        if (jitenStoppedUntil > Date.now()) return { status: 429, text: '' };
+        const stopped = Math.max(jitenStoppedUntil, (await getVal('jitenStoppedUntil')) || 0);
+        if (stopped > Date.now()) return { status: 429, text: '' };
         const start = Math.max(Date.now(), pausedUntil, nextJiten);
         nextJiten = start + JITEN_GAP;
         if (start > Date.now()) await sleep(start - Date.now());
@@ -166,6 +167,7 @@
       const wait = retryAfterMs(r.retryAfter);
       if (attempt >= 1 || wait > 10000) {
         jitenStoppedUntil = Date.now() + Math.max(wait, 60000);
+        await setVal('jitenStoppedUntil', jitenStoppedUntil);
         return r;
       }
       pausedUntil = Math.max(pausedUntil, Date.now() + wait);
@@ -318,7 +320,7 @@
         break;
       case 'missing-unchecked':
         set(null, 'NA', 'Not on Jiten' + (result.keyRejected ? '. Your API key was rejected, so requests weren\'t checked.'
-          : '. Set a Jiten API key (Tampermonkey menu) to also see which ones are already requested.'), `${JITEN}/requests/new`, { dim: true });
+          : '. Set a Jiten API key (Settings, in the Tampermonkey menu) to also see which ones are already requested.'), `${JITEN}/requests/new`, { dim: true });
         break;
       default:
         set(null, '?', result.message || 'lookup failed', null, { dim: true });
@@ -495,7 +497,8 @@
   //   scripts, says which titles in the list are on Jiten, and then only the page you're looking
   //   at is loaded from VNDB, the same as clicking to that page.
   // progress: the spinner's tooltip; step: the short counter next to it ("2/6").
-  const pages = { total: 1, current: 1, template: null, loading: false, loaded: false, progress: '', step: '', failed: 0, note: '' };
+  // declined: "Just this page" (or Never) was picked; the header then offers "(whole list)".
+  const pages = { total: 1, current: 1, template: null, loading: false, loaded: false, declined: false, progress: '', step: '', failed: 0, note: '' };
   let fetchSeq = 0;
 
   // VNDB rate-limits by IP, together with your own browsing, and doesn't publish the limit. So:
@@ -847,8 +850,10 @@
 
   // Loading other pages is the user's call (Settings → "Sorting lists with several pages"):
   // ask first (the default), always, or never. The question says how many requests it takes.
-  async function okToLoad(whole) {
-    const mode = (await getVal('loadMode')) || 'ask';
+  // true: load; false: this page only; null: the question was closed without an answer.
+  // "again" is the header's "(whole list)" link: it always asks, whatever the setting.
+  async function okToLoad(whole, again = false) {
+    const mode = again ? 'ask' : (await getVal('loadMode')) || 'ask';
     if (mode === 'never') return false;
     const until = (await getVal('vndbCooldownUntil')) || 0;
     if (until > Date.now()) {
@@ -858,8 +863,8 @@
     if (mode === 'always') return true;
     if (whole) {
       // At 200 rows per page, the page on screen doesn't need loading again.
-    const requests = Math.ceil((pages.total * readPerPage()) / (tableOpts() != null ? 200 : readPerPage()))
-      - (shownAt200() ? 1 : 0);
+      const requests = Math.ceil((pages.total * readPerPage()) / (tableOpts() != null ? 200 : readPerPage()))
+        - (shownAt200() ? 1 : 0);
       return askToLoad(`Sort the whole list (${pages.total} pages)?`,
         `This loads the list from VNDB in ${requests} request${requests === 1 ? '.' : 's'}`
         + (requests > 1 ? `, one every 3 seconds (about ${(requests - 1) * 3 + 1} seconds).` : ''),
@@ -873,8 +878,10 @@
       'Sort by Jiten titles');
   }
 
-  async function applySort(dir) {
-    if (!sortableTables.size || pages.loading) return;
+  // The pop-up doesn't trap keyboard focus, so Tab + Enter on an arrow could ask a second time.
+  let asking = false;
+  async function applySort(dir, again = false) {
+    if (!sortableTables.size || pages.loading || asking) return;
     if (!state.complete) { // sort as soon as the Jiten data is in
       pendingSort = dir;
       updateButton();
@@ -882,19 +889,30 @@
     }
     const table = [...sortableTables][0];
     const whole = canLoadAll();
-    if ((whole || canLoadJitenOnly()) && await okToLoad(whole)) {
-      pages.loading = true;
-      updateButton();
-      try {
-        if (whole) await loadAllPages(table); else await loadJitenTitles(table);
-      } catch (e) {
-        console.warn('[Jiten VNDB] could not load the whole list:', e);
-        pages.note = `${e.message}. Sorted this page only.`;
-        pages.failed++;
+    if ((whole || canLoadJitenOnly()) && (!pages.declined || again)) {
+      asking = true;
+      let ok;
+      try { ok = await okToLoad(whole, again); } finally { asking = false; }
+      if (ok === null) return; // closed without choosing: nothing happens
+      if (ok) {
+        pages.declined = false;
+        pages.loading = true;
+        updateButton();
+        try {
+          if (whole) await loadAllPages(table); else await loadJitenTitles(table);
+        } catch (e) {
+          console.warn('[Jiten VNDB] could not load the whole list:', e);
+          pages.note = `${e.message}. Sorted this page only.`;
+          pages.failed++;
+        }
+        pages.loading = false;
+        pages.loaded = true; // loaded once per page view: later sorts reuse what's here
+      } else {
+        pages.declined = true; // later sorts are this page only, until "(whole list)" is clicked
       }
-      pages.loading = false;
+    } else if (!pages.declined) {
+      pages.loaded = true;
     }
-    pages.loaded = true; // asked once per page view: later sorts reuse what's here
     if (!sortDir) for (const t of sortableTables) releaseVndbSort(t);
     sortDir = dir;
     view.page = 1;
@@ -996,12 +1014,20 @@
       headerParts.set(h, parts);
     }
     const { arrows, spin, count, warn } = parts;
-    const note = canLoadAll() ? ` (the whole list: ${pages.total} pages)`
-      : canLoadJitenOnly() ? ' (the titles in this list that are on Jiten)'
-        : pages.total > 1 && !pages.loaded ? ' (this page only)' : '';
+    const offer = canLoadAll() || canLoadJitenOnly();
+    const note = pages.declined ? ' (this page only)'
+      : canLoadAll() ? ` (the whole list: ${pages.total} pages)`
+        : canLoadJitenOnly() ? ' (the titles in this list that are on Jiten)'
+          : pages.total > 1 && !pages.loaded ? ' (this page only)' : '';
     arrows.textContent = '';
     for (const [dir, arrow, label] of [['asc', '▴', 'Easiest first'], ['desc', '▾', 'Hardest first']]) {
       arrows.append(sortDir === dir ? arrow : link(arrow, label + note, () => applySort(dir)));
+    }
+    // Like VNDB's own "Rating ▴▾ (▴▾)": a second choice in brackets.
+    if (pages.declined && offer && !pages.loading) {
+      arrows.append(' (', link('whole list', canLoadAll()
+        ? `Sort the whole list (${pages.total} pages). Asks first.`
+        : 'Sort this long list by its titles on Jiten. Asks first.', () => applySort(sortDir || 'desc', true)), ')');
     }
     const busy = busyText();
     if (busy) {
@@ -1031,7 +1057,7 @@
       let label = sortDir === 'desc' ? 'hardest first ▼' : sortDir === 'asc' ? 'easiest first ▲' : 'click to sort';
       const shown = view.lazy?.ids || view.rows;
       if (shown) label += ` · ${fmt(shown.length)} titles`;
-      else if (sortableTables.size && pages.total > 1 && !canLoadAll() && !canLoadJitenOnly()) label += ' (this page only)';
+      else if (sortableTables.size && pages.total > 1 && (pages.declined || (!canLoadAll() && !canLoadJitenOnly()))) label += ' (this page only)';
       if (pages.note) label += ` · ⚠ ${pages.note}`;
       text = sortableTables.size ? `⇅ Jiten % — ${label}` : '⇅ Jiten % — loaded';
     }
@@ -1400,7 +1426,7 @@
   const note = (...kids) => el('div', 'note', ...kids);
   const outLink = (href, text) => Object.assign(el('a', '', text), { href, target: '_blank', rel: 'noopener' });
 
-  // A centered panel over a dimmed page. Escape or a click outside closes it like "Cancel".
+  // A centered panel over a dimmed page. Escape or a click outside closes it without an answer.
   function openDialog(label, onClose) {
     const host = document.createElement('div');
     host.className = 'jvl-dialog';
@@ -1431,7 +1457,7 @@
   function askToLoad(title, text, yesLabel) {
     return new Promise((resolve) => {
       const remember = field('checkbox');
-      const d = openDialog(title, (yes) => resolve(!!yes));
+      const d = openDialog(title, (yes) => resolve(yes == null ? null : !!yes)); // closed: no answer
       const answer = (yes) => {
         if (remember.checked) setVal('loadMode', yes ? 'always' : 'never');
         d.close(yes);
