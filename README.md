@@ -21,6 +21,8 @@ so you can see at a glance which visual novels are easy or hard to read in Japan
 >   gets a 429, it also pauses for 10 minutes on its own.)
 > - **Want zero risk?** Open **Settings** from the Tampermonkey menu and set *Sorting lists with several pages*
 >   to *Never*. Sorting then only sorts the page you're on, and the script never loads anything extra from VNDB.
+> - **Tip: use VNDB's 200 results per page view.** A list of up to 200 titles then sorts without loading anything,
+>   bigger lists need one request less, and with *Never* each sort still covers 200 titles at once.
 >
 > This is an unofficial fan script, provided as is (see the [license](LICENSE)). You use it at your own risk.
 
@@ -52,7 +54,8 @@ so you can see at a glance which visual novels are easy or hard to read in Japan
   finds which titles in the list (with your filters) are on Jiten, and each page's rows are loaded from VNDB only
   when you open that page (one request covers four pages). A **+ N not on Jiten ›** tab takes you back to VNDB's
   own order with everything.
-- A small spinner next to the *Jiten* header shows while anything loads. Hover over it for progress.
+- A small spinner and a counter (like `2/6`) next to the *Jiten* header show while anything loads.
+  Hover over them for details.
 - There's also an optional floating button in the bottom-left corner that sorts and shows progress.
   It's off by default. Turn it on in **Settings**; its **×** turns it off again.
 - **Fits every VNDB skin.** The colors adjust to your skin: light text on dark skins, dark text on light skins,

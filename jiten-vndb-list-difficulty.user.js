@@ -7,7 +7,7 @@
 // @supportURL   https://github.com/BeannieMoon/jiten-vndb-lists/issues
 // @downloadURL  https://raw.githubusercontent.com/BeannieMoon/jiten-vndb-lists/main/jiten-vndb-list-difficulty.user.js
 // @updateURL    https://raw.githubusercontent.com/BeannieMoon/jiten-vndb-lists/main/jiten-vndb-list-difficulty.user.js
-// @version      3.5.1
+// @version      3.5.2
 // @description  Adds a Jiten difficulty column to VNDB lists (your ulist/wishlist/votes, the /v browse list, tag pages, staff/VA pages) and shows it on producer pages, marks what isn't on Jiten (NA), and sorts by difficulty.
 // @match        https://vndb.org/v
 // @match        https://vndb.org/v?*
@@ -32,7 +32,7 @@
 
   const JITEN = 'https://jiten.moe';
   const JITEN_API = 'https://api.jiten.moe/api';
-  const CLIENT_NAME = 'Jiten VNDB List Difficulty/3.5.1';
+  const CLIENT_NAME = 'Jiten VNDB List Difficulty/3.5.2';
   // Measured: 4-5 parallel requests is the fastest; more makes Jiten slower, and bursts get 429s.
   const CONCURRENCY = 4;
   const CATALOGUE_TTL = 24 * 60 * 60 * 1000;
@@ -455,6 +455,8 @@
     return parseInt(document.querySelector('.tableopts-results > a')?.textContent, 10) || 50;
   }
 
+  const shownAt200 = () => tableOpts() != null && readPerPage() === 200;
+
   // The same list (same filters, columns and sort) at 200 rows per page: a quarter of the requests.
   function at200(url) {
     const u = new URL(url);
@@ -472,7 +474,8 @@
   // - Longer ones (the /v browse list, big tag pages) never are: VNDB's API, which is meant for
   //   scripts, says which titles in the list are on Jiten, and then only the page you're looking
   //   at is loaded from VNDB, the same as clicking to that page.
-  const pages = { total: 1, current: 1, template: null, loading: false, loaded: false, progress: '', failed: 0, note: '' };
+  // progress: the spinner's tooltip; step: the short counter next to it ("2/6").
+  const pages = { total: 1, current: 1, template: null, loading: false, loaded: false, progress: '', step: '', failed: 0, note: '' };
   let fetchSeq = 0;
 
   // VNDB rate-limits by IP, together with your own browsing, and doesn't publish the limit. So:
@@ -673,9 +676,19 @@
     const c = collector(table);
     const url = at200(pages.template);
     const maxRequests = Math.ceil(MAX_LIST_TITLES / (tableOpts() != null ? 200 : readPerPage()));
-    let total = 1;
+    // Already showing 200 rows per page: the page on screen is one of the pages to load, so
+    // it's used as it is instead of being loaded again.
+    const onScreen = shownAt200() ? pages.current : 0;
+    let total = onScreen ? pages.total : 1;
+    let n = 0;
     for (let p = 1; p <= total; p++) {
-      pages.progress = `Loading the whole list (${p}/${p === 1 ? '?' : total})…`;
+      if (p === onScreen) {
+        c.take({ rows: c.unused(), widgets: [] });
+        continue;
+      }
+      const of = onScreen ? total - 1 : p > 1 ? total : '?';
+      pages.step = `${++n}/${of}`;
+      pages.progress = `Loading the whole list from VNDB (request ${n} of ${of}, one every 3 seconds)…`;
       updateButton();
       const res = await fetchPage(url, p);
       if (p === 1) total = res.total;
@@ -716,7 +729,8 @@
       members = [];
       const count = Math.ceil(ids.length / 100);
       for (let i = 0; i < count; i++) {
-        pages.progress = `Finding the titles in this list that are on Jiten (${i}/${count})…`;
+        pages.step = `${i + 1}/${count}`;
+        pages.progress = `Asking VNDB's API which titles in this list are on Jiten (request ${i + 1} of ${count})…`;
         updateButton();
         const byId = ['or', ...ids.slice(i * 100, i * 100 + 100).map((v) => ['id', '=', v])];
         const r = await vndbApi({ filters: parts.length ? ['and', ...parts, byId] : byId, fields: 'id', results: 100 });
@@ -763,6 +777,7 @@
       if (!L.stopped && want.some((v) => !L.cache.has(v))) {
         L.busy = true;
         pages.loading = true;
+        pages.step = '';
         pages.progress = 'Loading this page from VNDB…';
         drawTabs(table, pageCount);
         updateButton();
@@ -822,7 +837,9 @@
     }
     if (mode === 'always') return true;
     if (whole) {
-      const requests = Math.ceil((pages.total * readPerPage()) / (tableOpts() != null ? 200 : readPerPage()));
+      // At 200 rows per page, the page on screen doesn't need loading again.
+    const requests = Math.ceil((pages.total * readPerPage()) / (tableOpts() != null ? 200 : readPerPage()))
+      - (shownAt200() ? 1 : 0);
       return askToLoad(`Sort the whole list (${pages.total} pages)?`,
         `This loads the list from VNDB in ${requests} request${requests === 1 ? '.' : 's'}`
         + (requests > 1 ? `, one every 3 seconds (about ${(requests - 1) * 3 + 1} seconds).` : ''),
@@ -898,7 +915,7 @@
   }
 
   // The column header looks like VNDB's own ("Vote ▴▾": links, the active direction as plain
-  // text), with VNDB's spinner next to it while anything is loading.
+  // text), with a spinner and a counter next to it while anything is loading.
   function link(text, title, onClick) {
     const a = document.createElement('a');
     a.href = '#';
@@ -917,34 +934,68 @@
     return null;
   }
 
+  // The short counter next to the spinner, so you can see it moving along.
+  function busyCount() {
+    if (!state.complete) return state.catTotal ? `${state.catDone}/${state.catTotal}` : '';
+    if (pages.loading) return pages.step;
+    if (state.reqTotal > state.reqDone) return `${state.reqDone}/${state.reqTotal}`;
+    return '';
+  }
+
+  // A small ring in the skin's text color. It's a Web Animation on transform, so it keeps
+  // turning even while the browser is busy sorting a big list.
+  function makeSpinner() {
+    const s = document.createElement('span');
+    s.className = 'jvl-spinner';
+    s.style.cssText = 'display:inline-block;vertical-align:middle;margin-left:6px;width:8px;height:8px;'
+      + 'border:2px solid currentColor;border-right-color:transparent;border-radius:50%;opacity:.75';
+    s.animate?.([{ transform: 'rotate(0deg)' }, { transform: 'rotate(360deg)' }], { duration: 800, iterations: Infinity });
+    return s;
+  }
+
+  // The header's parts are kept between updates: re-creating the spinner on every progress
+  // update restarted its animation each time, so it looked stuck.
+  const headerParts = new WeakMap();
   function renderHeader(h) {
-    h.textContent = 'Jiten ';
-    h.removeAttribute('title');
     if (state.error) {
+      headerParts.delete(h);
+      h.textContent = 'Jiten ';
       h.append(link('⚠', `Jiten: ${state.error.message} — click to retry`, start));
       return;
     }
+    let parts = headerParts.get(h);
+    if (!parts || parts.arrows.parentNode !== h) {
+      h.textContent = 'Jiten ';
+      parts = { arrows: document.createElement('span'), spin: makeSpinner(), count: document.createElement('span'),
+        warn: document.createElement('span') };
+      parts.count.style.cssText = 'margin-left:4px;font-size:smaller;opacity:.75;font-variant-numeric:tabular-nums;white-space:nowrap';
+      parts.warn.className = 'jvl-warn';
+      parts.warn.style.cursor = 'help';
+      h.append(parts.arrows);
+      headerParts.set(h, parts);
+    }
+    const { arrows, spin, count, warn } = parts;
     const note = canLoadAll() ? ` (the whole list: ${pages.total} pages)`
       : canLoadJitenOnly() ? ' (the titles in this list that are on Jiten)'
         : pages.total > 1 && !pages.loaded ? ' (this page only)' : '';
+    arrows.textContent = '';
     for (const [dir, arrow, label] of [['asc', '▴', 'Easiest first'], ['desc', '▾', 'Hardest first']]) {
-      h.append(sortDir === dir ? arrow : link(arrow, label + note, () => applySort(dir)));
+      arrows.append(sortDir === dir ? arrow : link(arrow, label + note, () => applySort(dir)));
     }
     const busy = busyText();
     if (busy) {
-      const s = document.createElement('span');
-      s.className = 'spinner';
-      s.title = busy;
-      s.style.cssText = 'display:inline-block;vertical-align:middle;margin-left:6px;width:12px;height:12px';
-      h.append(s);
+      spin.title = count.title = busy;
+      count.textContent = busyCount();
+      if (!spin.isConnected) arrows.after(spin, count);
+    } else {
+      spin.remove();
+      count.remove();
     }
     if (pages.note) {
-      const w = document.createElement('span');
-      w.textContent = ' ⚠';
-      w.title = pages.note;
-      w.style.cursor = 'help';
-      h.append(w);
-    }
+      warn.textContent = ' ⚠';
+      warn.title = pages.note;
+      if (!warn.isConnected) h.append(warn);
+    } else warn.remove();
   }
 
   function updateButton() {
